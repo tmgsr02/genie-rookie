@@ -1,0 +1,14 @@
+{"op":"scene","title":"Pressure at the bottom of a tank","learning_goal":"Water pushes harder the deeper you go, because more water is stacked above that point.","model_kind":"simplified","assumptions":["The gauge reads the water pressure at the bottom of the tank, above air pressure."],"limitations":["The tank is drawn small; the numbers are for a tank 2 metres tall."],"stage":{"w":200,"d":120,"h":150}}
+{"op":"part","id":"bench","kind":"bench","params":{"w":200,"d":120}}
+{"op":"value","name":"fill","label":"How full the tank is","min":0,"max":1,"initial":0.25}
+{"op":"derive","name":"depth","expr":"fill * 2","unit":"m"}
+{"op":"derive","name":"pressure","expr":"1000 * g * depth / 1000","unit":"kPa"}
+{"op":"part","id":"tank","kind":"tank","on":"bench.top","at":[-40,-5],"params":{"r":26,"h":110},"bind":{"level":"fill"}}
+{"op":"part","id":"plinth","kind":"block","on":"bench.top","at":[42,10],"params":{"w":46,"d":46,"h":16,"raised":0}}
+{"op":"part","id":"gauge","kind":"dial","on":"plinth.top","params":{"r":19},"bind":{"fraction":"pressure / 20"}}
+{"op":"part","id":"lamp","kind":"lamp","on":"bench.top","at":[50,-38],"bind":{"glow":"fill > 0.9 ? 1 : 0"}}
+{"op":"readout","text":"water {depth:1} m deep · {pressure:1} kPa"}
+{"op":"control","name":"set_fill","label":"Fill the tank","input":{"share":{"type":"number","min":0,"max":1}},"set":{"fill":"input.share"}}
+{"op":"touch","part":"tank","control":"set_fill","input":{"share":"fill >= 1 ? 0 : min(1, fill + 0.25)"}}
+{"op":"beat","say":"This gauge reads how hard the water pushes at the bottom of the tank.","cues":[{"word":1,"focus":"gauge"}]}
+{"op":"beat","speaker":"rookie","say":"Let's fill it right up and watch the needle.","cues":[{"word":2,"control":"set_fill","input":{"share":1}},{"word":7,"focus":"gauge"}]}

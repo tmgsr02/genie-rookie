@@ -1,0 +1,268 @@
+import AVFoundation
+import OSLog
+import Speech
+
+@MainActor
+private final class RecognitionSession {
+    let analyzer: SpeechAnalyzer
+    let input: AsyncStream<AnalyzerInput>.Continuation
+    let results: Task<Void, Error>
+    /// Audio has gone to its input.
+    var fed = false
+
+    init(analyzer: SpeechAnalyzer, input: AsyncStream<AnalyzerInput>.Continuation, results: Task<Void, Error>) {
+        self.analyzer = analyzer
+        self.input = input
+        self.results = results
+    }
+
+    func cancel() async {
+        input.finish()
+        await analyzer.cancelAndFinishNow()
+        results.cancel()
+    }
+}
+
+@MainActor
+final class AppleSpeechRecognizer {
+    private let audio: VoiceAudioEngine
+    private var session: RecognitionSession?
+    private var capture: SpeechAudioInput?
+    private var format: AVAudioFormat?
+    private var configuration: SpeechRecognitionConfiguration?
+    private var finalizationTask: Task<Void, Error>?
+    private var epoch = UUID()
+    /// Hold to talk: speech is recognized only while `listening`, and nothing scores speech
+    /// activity. Set before `start`.
+    var holdsToTalk = false
+    /// Hold to talk: the microphone is held.
+    private var listening = false
+    private let logger = Logger(subsystem: "ai.pipecat.littlevoices", category: "Speech")
+    /// The speech model lingers after an analyzer finishes, so the next one, for the next turn
+    /// or conversation, starts without loading it.
+    private static let options = SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .lingering)
+    var onTranscript: ((String, Bool, Double, Double) -> Void)?
+    var onVAD: ((Double, Double, Double) -> Void)?
+    var onLevel: ((Double) -> Void)?
+    var onError: ((String) -> Void)?
+
+    init(audio: VoiceAudioEngine) { self.audio = audio }
+
+    func logAudioMetrics(stage: String) { capture?.logMetrics(stage: stage) }
+
+    /// Load the speech model ahead of `start`, without the microphone. Assets not yet installed
+    /// download when a conversation starts.
+    func prepare() async {
+        guard let configuration = try? await SpeechRecognitionConfiguration.resolve() else { return }
+        let transcriber = configuration.makeTranscriber()
+        guard await AssetInventory.status(forModules: [transcriber]) == .installed,
+              let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else { return }
+        let analyzer = SpeechAnalyzer(modules: [transcriber], options: Self.options)
+        do { try await analyzer.prepareToAnalyze(in: format) }
+        catch { logger.error("Speech model failed to load: \(error.localizedDescription, privacy: .public)") }
+        await analyzer.cancelAndFinishNow()
+    }
+
+    /// Start recognizing on a fresh input generation: callbacks from an earlier one are dropped.
+    /// Holding to talk, recognition waits for `listen(true)`.
+    func start() async throws {
+        let generation = UUID()
+        let previous = resetCapture(generation: generation)
+        await previous?.cancel()
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+        guard await AVAudioApplication.requestRecordPermission() else {
+            throw VoiceError(message: "Genius & Rookie needs your microphone to hear you. Allow it in Settings › Apps › "
+                + "Genius & Rookie, then try again.")
+        }
+        guard let configuration = try await SpeechRecognitionConfiguration.resolve() else {
+            #if targetEnvironment(simulator)
+            throw VoiceError(message: "Microphone conversations aren’t available in the Simulator. Type in “Ask anything…” "
+                + "to test with the tutor service, or run on a physical iPhone to talk. Changing voices won’t enable the microphone.")
+            #else
+            throw VoiceError(message: "English speech recognition isn’t available on this iPhone. "
+                + "You can still type in “Ask anything…” and hear the characters reply.")
+            #endif
+        }
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+        logger.notice("SPEECH_RECOGNITION: selected \(configuration.diagnosticName, privacy: .public)")
+        let transcriber = configuration.makeTranscriber()
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            do { try await request.downloadAndInstall() }
+            catch is CancellationError { throw CancellationError() }
+            catch {
+                logger.error("Speech assets failed to install: \(error.localizedDescription, privacy: .public)")
+                throw VoiceError(message: "Apple’s English speech recognition couldn’t download. Check your "
+                    + "connection and free storage, then try again.")
+            }
+        }
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+        let hardware = try audio.microphoneFormat()
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: hardware) else {
+            throw VoiceError(message: "No audio format is available for speech recognition.")
+        }
+        try Task.checkCancellation()
+        guard epoch == generation else { throw CancellationError() }
+        self.format = format
+        self.configuration = configuration
+        let session = try await makeSession(transcriber: transcriber, format: format, generation: generation)
+        guard epoch == generation, !Task.isCancelled else {
+            await session.cancel()
+            throw CancellationError()
+        }
+        self.session = session
+        session.fed = !holdsToTalk
+        do {
+            let capture = try SpeechAudioInput(sourceFormat: hardware, format: format,
+                input: holdsToTalk ? nil : session.input,
+                onVAD: { [weak self] confidence, time, volume in
+                    Task { @MainActor in
+                        guard let self, self.epoch == generation else { return }
+                        self.onVAD?(confidence, time, volume)
+                    }
+                }, onLevel: { [weak self] level in
+                    Task { @MainActor in
+                        guard let self, self.epoch == generation else { return }
+                        self.onLevel?(level)
+                    }
+                }, onError: { [weak self] message in
+                    Task { @MainActor in
+                        guard let self, self.epoch == generation else { return }
+                        self.onError?(message)
+                    }
+                }, classifiesSpeech: !holdsToTalk)
+            self.capture = capture
+            try audio.startCapture { buffer, _ in capture.consume(buffer) }
+        } catch {
+            if epoch == generation { await stop() }
+            throw error
+        }
+    }
+
+    private func makeSession(transcriber: some OnDeviceTranscriber, format: AVAudioFormat,
+                             generation: UUID) async throws -> RecognitionSession {
+        let analyzer = SpeechAnalyzer(modules: [transcriber], options: Self.options)
+        try await analyzer.prepareToAnalyze(in: format)
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream(
+            bufferingPolicy: .bufferingNewest(SpeechAudioInput.asrBufferCapacity))
+        let results = Task(priority: .userInitiated) { [weak self] in
+            do {
+                for try await result in transcriber.results {
+                    guard let self, self.epoch == generation else { return }
+                    self.onTranscript?(String(result.text.characters), result.isFinal,
+                                       result.range.start.seconds, result.range.end.seconds)
+                }
+            } catch is CancellationError { }
+            catch {
+                if let self, self.epoch == generation {
+                    self.logger.error("Speech recognition failed: \(error.localizedDescription, privacy: .public)")
+                    self.onError?("Speech recognition stopped. Tap the microphone to start again.")
+                }
+                throw error
+            }
+        }
+        do { try await analyzer.start(inputSequence: stream) }
+        catch {
+            continuation.finish()
+            await analyzer.cancelAndFinishNow()
+            results.cancel()
+            throw error
+        }
+        return RecognitionSession(analyzer: analyzer, input: continuation, results: results)
+    }
+
+    /// Hold to talk: open recognition as the microphone is pressed, with the pre-roll unless
+    /// `preRoll` is false, or finalize and close it as it is released.
+    func listen(_ on: Bool, preRoll: Bool = true) async throws {
+        listening = on
+        let generation = epoch
+        // A finalization in progress opens the next session itself if the microphone is held.
+        while let finalizationTask {
+            try await finalizationTask.value
+            guard epoch == generation else { throw CancellationError() }
+        }
+        guard listening == on, let session, let capture else { return }
+        if on {
+            guard !session.fed else { return }
+            session.fed = true
+            try await capture.resumeASR(session.input, replaying: preRoll)
+        } else {
+            try await finalize()
+        }
+    }
+
+    /// Finish an utterance without ending capture or VAD. Apple finalize(through:)
+    /// publishes results but offers no consumer barrier. Rotating only the ASR
+    /// session lets us await its result stream before acknowledging the endpoint.
+    /// Holding to talk, a session nothing has been said into needs none.
+    func finalize() async throws {
+        let generation = epoch
+        // An earlier endpoint may still be rotating ASR after resumed speech
+        // cancelled its request. Its replacement contains newer audio; this
+        // endpoint must finalize that audio too before acknowledging the turn.
+        while let finalizationTask {
+            try await finalizationTask.value
+            try Task.checkCancellation()
+            guard epoch == generation else { throw CancellationError() }
+        }
+        try Task.checkCancellation()
+        guard let capture, let previous = session, let format, let configuration else {
+            throw CancellationError()
+        }
+        guard previous.fed else { return }
+        // This unstructured task survives cancellation of the Python request that
+        // asked for finalization, so resumed user speech cannot strand capture.
+        let task = Task(priority: .userInitiated) { [weak self] in
+            guard let self else { throw CancellationError() }
+            // Clear ownership before awaiting callers resume. An older caller
+            // must never clear a newer rotation's task after it has started.
+            defer { if self.epoch == generation { self.finalizationTask = nil } }
+            let transcriber = configuration.makeTranscriber()
+            let replacement = try await self.makeSession(transcriber: transcriber, format: format, generation: generation)
+            do {
+                guard self.epoch == generation, !Task.isCancelled else { throw CancellationError() }
+                // Cut at the newest captured audio, including any trailing words
+                // after the VAD window. Future input is buffered on the same clock.
+                try await capture.pauseASR()
+                try await previous.analyzer.finalizeAndFinishThroughEndOfInput()
+                try await previous.results.value
+                guard self.epoch == generation, !Task.isCancelled else { throw CancellationError() }
+                self.session = replacement
+                if self.holdsToTalk, !self.listening {
+                    try await capture.closeASR()
+                } else {
+                    replacement.fed = true
+                    try await capture.resumeASR(replacement.input)
+                }
+            } catch {
+                await replacement.cancel()
+                throw error
+            }
+        }
+        finalizationTask = task
+        try await task.value
+    }
+
+    func stop() async {
+        let previous = resetCapture(generation: UUID())
+        await previous?.cancel()
+    }
+
+    private func resetCapture(generation: UUID) -> RecognitionSession? {
+        epoch = generation
+        listening = false
+        audio.stopCapture()
+        capture?.cancel()
+        capture = nil
+        let previous = session
+        session = nil
+        format = nil
+        configuration = nil
+        finalizationTask?.cancel()
+        finalizationTask = nil
+        onLevel?(0)
+        return previous
+    }
+}

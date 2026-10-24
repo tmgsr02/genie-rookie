@@ -1,0 +1,52 @@
+[
+  {
+    "url": "https://www.spacex.com/updates/reusability",
+    "title": "SpaceX \u2014 Starship takes flight",
+    "excerpt": "Retrieved source summary, 2026-10-24: SpaceX describes the Raptor used for SN5 as a reusable methane/oxygen engine using full-flow staged combustion."
+  },
+  {
+    "url": "https://www.nasa.gov/news-release/new-rocket-engine-combustion-cycle-technology-testing-reaches-100-power-level/",
+    "title": "NASA \u2014 Full-flow IPD demonstration",
+    "excerpt": "Retrieved source summary, 2026-10-24: The full-flow cycle uses separate fuel-rich and oxidizer-rich preburners to power the corresponding fuel and oxygen turbopumps. Sending the propellant flow through these circuits increases turbine driving mass flow, permitting lower turbine temperatures. The IPD demonstration itself uses hydrogen and oxygen; it is evidence for the cycle, not a Raptor hardware drawing."
+  },
+  {
+    "url": "https://ntrs.nasa.gov/api/citations/20160008869/downloads/20160008869.pdf",
+    "title": "NASA \u2014 Liquid rocket propulsion chapter 12",
+    "excerpt": "Retrieved source summary, 2026-10-24: Staged-combustion preburners use a large excess of fuel or oxygen to keep gas temperature within turbine limits. Gas leaving the turbines flows through the main injector into the chamber and burns with the remaining propellants."
+  },
+  {
+    "url": "https://www.nasa.gov/organizations/otps/2024-invention-of-the-year-winner/",
+    "title": "NASA \u2014 Thrust chamber liner and fabrication method",
+    "excerpt": "Retrieved source summary, 2026-10-24: A liquid engine injects fuel and oxidizer into a chamber and expands the hot gas through a nozzle. Regenerative cooling circulates propellant through internal wall channels before injection, protecting the chamber/nozzle material from excessive heat."
+  },
+  {
+    "url": "https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/rocket-thrust/",
+    "title": "NASA Glenn \u2014 Rocket thrust",
+    "excerpt": "Retrieved source summary, 2026-10-24: Combustion produces hot, high-pressure gas. The nozzle accelerates exhaust, generating reaction thrust. Thrust depends on exhaust mass flow, exit speed and pressure difference; F = mass_flow * exit_velocity + exit_area * (exit_pressure - ambient_pressure). Rockets carry oxidizer and can operate in vacuum without pushing against surrounding air."
+  },
+  {
+    "url": "https://ntrs.nasa.gov/citations/19850004010",
+    "title": "NASA \u2014 Methane heat transfer investigation",
+    "excerpt": "Retrieved source summary, 2026-10-24: NASA investigated methane cooling characteristics for reusable, high-pressure oxygen/hydrocarbon rocket engines with chamber coolant channels. This supports methane as a regenerative coolant; it does not establish exact Raptor plumbing dimensions or timing."
+  },
+  {
+    "url": "https://www.nasa.gov/rocket-engine-test-facility-buildings-and-systems/",
+    "title": "NASA \u2014 Rocket Engine Test Facility buildings and systems",
+    "excerpt": "Retrieved source summary, 2026-10-24: NASA describes a vertical rocket-engine test stand whose supporting frame includes load cells and other instruments for measuring thrust and test data. This supports the depicted load-cell function, not the exact shape of the illustrative stand."
+  },
+  {
+    "url": "https://www.nasa.gov/blogs/missions/2021/03/18/green-run-update-terminal-countdown-sequence-started/",
+    "title": "NASA \u2014 Green Run terminal countdown",
+    "excerpt": "Retrieved source summary, 2026-10-24: NASA describes cooling water protecting the B-2 stand flame deflector from engine exhaust and separate water flow for acoustic suppression during hot fire."
+  },
+  {
+    "url": "https://www.nasa.gov/wp-content/uploads/2015/05/december_lagniappe_0.pdf",
+    "title": "NASA Stennis \u2014 Lagniappe December 2017",
+    "excerpt": "Retrieved source summary, 2026-10-24: The test stand uses a large flame deflector to send fire and exhaust downward and outward. Water passes through many holes in the deflector during the test. This establishes the deflection and deluge functions; the drawing\u2019s cone/ring shapes remain schematic."
+  },
+  {
+    "url": "https://www.nasa.gov/centers-and-facilities/stennis/preparation-for-artemis-iv-testing/",
+    "title": "NASA Stennis \u2014 Preparing Artemis IV testing",
+    "excerpt": "Retrieved source summary, 2026-10-24: NASA describes water-cooled diffusers, exhaust-directing fairings and cooling provisions for a flexible seal that lets engines gimbal during tests. These are general test-stand functions, not a dimensional reference for the supplied Raptor-style illustration."
+  }
+]

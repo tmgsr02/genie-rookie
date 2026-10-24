@@ -1,0 +1,173 @@
+.eg-page {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 8px;
+}
+
+.eg.iso-figure {
+  margin: 0;
+}
+
+.eg .iso-plate {
+  overflow: hidden;
+  padding: 40px 10px 34px;
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px var(--anatomy-faint);
+}
+
+.eg .iso-plate-corner[data-corner="title"] {
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.eg .iso-plate-corner[data-corner="readout"] {
+  max-width: 100%;
+  white-space: normal;
+  text-align: right;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.eg-svg {
+  touch-action: manipulation;
+  /* The whole figure fits the viewport, however short the app's scene area is. */
+  max-height: calc(100vh - 92px);
+}
+
+.iso-line.eg-wire {
+  stroke-width: 1.3px;
+}
+
+.iso-line.eg-needle {
+  stroke-width: 1.2px;
+}
+
+.eg-it[data-dim] {
+  --anatomy-hi: var(--anatomy-mid);
+  --anatomy-mid: var(--anatomy-lo);
+}
+
+.eg-it[data-on] {
+  --anatomy-hi: var(--anatomy-lit);
+  --anatomy-mid: var(--anatomy-hi);
+  --anatomy-top: var(--anatomy-lit-top);
+  --anatomy-shade-2: var(--anatomy-lit-shade);
+  --anatomy-shade-3: var(--anatomy-lit-shade);
+}
+
+.eg-arrive {
+  animation: eg-arrive 480ms var(--anatomy-ease) both;
+  animation-delay: var(--eg-delay, 0ms);
+}
+
+@keyframes eg-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.eg-hit {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+  cursor: pointer;
+  outline: none;
+}
+
+.eg-hit:focus-visible {
+  stroke: var(--anatomy-mid);
+  stroke-width: 1px;
+  stroke-dasharray: 3 3;
+}
+
+.eg-liquid {
+  --eg-water: #3b82c4;
+  --anatomy-shade-0: color-mix(in oklab, var(--anatomy-paper), var(--eg-water) 70%);
+  --anatomy-shade-1: color-mix(in oklab, var(--anatomy-paper), var(--eg-water) 64%);
+  --anatomy-shade-2: color-mix(in oklab, var(--anatomy-paper), var(--eg-water) 58%);
+  --anatomy-shade-3: color-mix(in oklab, var(--anatomy-paper), var(--eg-water) 52%);
+  --anatomy-top: color-mix(in oklab, var(--anatomy-paper), var(--eg-water) 40%);
+}
+
+.eg-bulb {
+  --anatomy-shade-0: color-mix(in oklab, var(--anatomy-paper), #f5b83d 55%);
+  --anatomy-shade-1: color-mix(in oklab, var(--anatomy-paper), #f5b83d 45%);
+  --anatomy-shade-2: color-mix(in oklab, var(--anatomy-paper), #f5b83d 35%);
+  --anatomy-shade-3: color-mix(in oklab, var(--anatomy-paper), #f5b83d 25%);
+}
+
+.eg-glow {
+  fill: url(#eg-glow-fill);
+  pointer-events: none;
+}
+
+.eg-glow-0 {
+  stop-color: #ffd27a;
+  stop-opacity: 0.9;
+}
+
+.eg-glow-1 {
+  stop-color: #ffb347;
+  stop-opacity: 0.35;
+}
+
+.eg-glow-2 {
+  stop-color: #ffb347;
+  stop-opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eg-arrive {
+    animation: none;
+  }
+}
+
+.eg-window {
+  fill: color-mix(in oklab, var(--anatomy-shade-0), var(--anatomy-lo) 35%);
+  stroke: none;
+}
+
+.eg-fluid-fill,
+.eg-fluid {
+  --eg-ox: #4f8fe0;
+  --eg-fuel: #e0912e;
+  --eg-gas: #c25b9a;
+}
+
+.eg-fluid-fill[data-fluid="ox"] { fill: color-mix(in oklab, var(--anatomy-paper), var(--eg-ox) 62%); }
+.eg-fluid-fill[data-fluid="fuel"] { fill: color-mix(in oklab, var(--anatomy-paper), var(--eg-fuel) 62%); }
+.eg-fluid-fill[data-fluid="gas"] { fill: color-mix(in oklab, var(--anatomy-paper), var(--eg-gas) 62%); }
+
+.eg-fluid[data-fluid="ox"] { --eg-tint: var(--eg-ox); }
+.eg-fluid[data-fluid="fuel"] { --eg-tint: var(--eg-fuel); }
+.eg-fluid[data-fluid="gas"] { --eg-tint: var(--eg-gas); }
+
+.eg-fluid {
+  --anatomy-shade-0: color-mix(in oklab, var(--anatomy-paper), var(--eg-tint) calc(var(--fx, 0) * 55%));
+  --anatomy-shade-2: color-mix(in oklab, var(--anatomy-paper), var(--eg-tint) calc(var(--fx, 0) * 45%));
+  --anatomy-top: color-mix(in oklab, var(--anatomy-paper), var(--eg-tint) calc(var(--fx, 0) * 30%));
+}
+
+.eg-flame-outer {
+  stroke: none;
+  mix-blend-mode: multiply;
+}
+
+.eg-flame-core {
+  fill: #fff3cf;
+  stroke: none;
+  opacity: 0.95;
+}
+
+.eg-flame-0 { stop-color: #fff1c2; stop-opacity: 1; }
+.eg-flame-1 { stop-color: #ffb23f; stop-opacity: 0.95; }
+.eg-flame-2 { stop-color: #f0642a; stop-opacity: 0.55; }
+.eg-flame-3 { stop-color: #e2462a; stop-opacity: 0; }

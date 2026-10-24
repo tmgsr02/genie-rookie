@@ -1,0 +1,7 @@
+node_modules/
+.env
+.work/
+.wrangler/
+artifacts/*
+!artifacts/.gitkeep
+vendor/anatomy/.git/

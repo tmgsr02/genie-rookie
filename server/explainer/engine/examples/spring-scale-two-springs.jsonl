@@ -1,0 +1,7 @@
+{"op":"value","name":"springs","label":"Springs side by side","min":1,"max":2,"initial":1,"integer":true}
+{"op":"derive","name":"stretch","expr":"masses * 0.05 * g / (40 * springs) * 1000","unit":"mm"}
+{"op":"part","id":"spring","kind":"spring","on":"arm.tip","params":{"rest":44,"turns":11,"radius":5.5},"bind":{"stretch":"stretch","count":"springs"}}
+{"op":"control","name":"set_springs","label":"Hang it from more springs","input":{"count":{"type":"integer","min":1,"max":2}},"set":{"springs":"input.count"}}
+{"op":"readout","text":"{masses} × 50 g · {springs} × spring · stretch {stretch:0} mm"}
+{"op":"beat","say":"Let's hang the same three masses from two springs side by side.","cues":[{"word":3,"control":"set_masses","input":{"count":3}},{"word":8,"control":"set_springs","input":{"count":2}}]}
+{"op":"beat","speaker":"rookie","say":"Each spring now carries half the load, so the pointer only moves half as far.","cues":[{"word":1,"focus":"spring"},{"word":9,"focus":"pointer"}]}

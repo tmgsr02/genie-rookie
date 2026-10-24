@@ -1,0 +1,25 @@
+{"op":"scene","title":"How a rocket works","learning_goal":"A rocket burns fuel with oxygen and throws the hot gas down out of its nozzle; when that push is bigger than the rocket's weight, it lifts off.","model_kind":"simplified","assumptions":["The rocket weighs 1,200 kN on the pad.","Full throttle gives 1,800 kN of thrust."],"limitations":["Real engines need igniters, valves and many more pipes."],"stage":{"w":220,"d":160,"h":300}}
+{"op":"part","id":"bench","kind":"bench","params":{"w":220,"d":160}}
+{"op":"part","id":"stand","kind":"launch_stand","on":"bench.top","params":{"height":130,"span":76}}
+{"op":"value","name":"throttle","label":"Throttle","min":0,"max":1,"initial":0}
+{"op":"derive","name":"thrust","expr":"throttle * 1800","unit":"kN"}
+{"op":"derive","name":"rise","expr":"thrust > 1200 ? (thrust - 1200) / 600 * 110 : 0"}
+{"op":"part","id":"chamber","kind":"combustion_chamber","on":"stand.deck","params":{"r":12,"length":30},"bind":{"lift":"rise"}}
+{"op":"part","id":"nozzle","kind":"nozzle","on":"chamber.throat","params":{"throat":6.6,"exit":22,"length":44}}
+{"op":"part","id":"flame","kind":"flame","on":"nozzle.exit","params":{"width":22},"bind":{"length":"throttle * 80"}}
+{"op":"part","id":"ox_tank","kind":"propellant_tank","on":"chamber.top","params":{"r":18,"h":64,"fluid":"ox"},"bind":{"level":"0.9"}}
+{"op":"part","id":"fuel_tank","kind":"propellant_tank","on":"ox_tank.top","params":{"r":18,"h":48,"fluid":"fuel"},"bind":{"level":"0.85"}}
+{"op":"part","id":"nose","kind":"nose_cone","on":"fuel_tank.top","params":{"r":18,"h":42}}
+{"op":"part","id":"fins","kind":"fins","on":"ox_tank.base","params":{"r":18,"span":14,"h":30}}
+{"op":"part","id":"ox_pump","kind":"turbopump","on":"chamber.top","at":[-22,22],"params":{"r":6,"length":28},"bind":{"speed":"throttle"}}
+{"op":"part","id":"fuel_pump","kind":"turbopump","on":"chamber.top","at":[22,-22],"params":{"r":6,"length":28},"bind":{"speed":"throttle"}}
+{"op":"part","id":"ox_line","kind":"pipe","on":"ox_tank.port","params":{"to":"ox_pump.inlet","fluid":"ox","bulge":10},"bind":{"flow":"throttle"}}
+{"op":"part","id":"fuel_line","kind":"pipe","on":"fuel_tank.port","params":{"to":"fuel_pump.inlet","fluid":"fuel","bulge":16},"bind":{"flow":"throttle"}}
+{"op":"part","id":"ox_feed","kind":"pipe","on":"ox_pump.outlet","params":{"to":"chamber.port","fluid":"ox","bulge":6},"bind":{"flow":"throttle"}}
+{"op":"part","id":"fuel_feed","kind":"pipe","on":"fuel_pump.outlet","params":{"to":"chamber.port","fluid":"fuel","bulge":8},"bind":{"flow":"throttle"}}
+{"op":"readout","text":"thrust {thrust:0} kN · weight 1200 kN"}
+{"op":"control","name":"set_throttle","label":"Open the throttle","input":{"level":{"type":"number","min":0,"max":1}},"set":{"throttle":"input.level"}}
+{"op":"touch","part":"chamber","control":"set_throttle","input":{"level":"throttle >= 1 ? 0 : min(1, throttle + 0.35)"}}
+{"op":"beat","speaker":"genie","say":"Oxygen and fuel flow from these tanks through two spinning pumps into the engine.","cues":[{"word":3,"focus":"ox_tank"},{"word":9,"focus":"ox_pump"},{"word":12,"focus":"chamber"}]}
+{"op":"beat","speaker":"genie","say":"Open the throttle and the burning gas rushes out of the nozzle.","cues":[{"word":1,"control":"set_throttle","input":{"level":0.5}},{"word":10,"focus":"flame"}]}
+{"op":"beat","speaker":"rookie","say":"Once the push is bigger than the rocket's weight, it lifts off!","cues":[{"word":2,"control":"set_throttle","input":{"level":1}}]}

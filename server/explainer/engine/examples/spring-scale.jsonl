@@ -1,0 +1,17 @@
+{"op":"scene","title":"Stretching a spring","learning_goal":"A spring stretches in proportion to the weight hanging on it, so twice the weight gives twice the stretch.","model_kind":"simplified","assumptions":["Each slotted mass is 50 g.","The spring has a stiffness of 40 newtons per metre and stays within its elastic range.","The hanger itself is treated as weightless."],"limitations":["Real springs stop stretching evenly if overloaded."],"stage":{"w":200,"d":120,"h":212}}
+{"op":"part","id":"bench","kind":"bench","params":{"w":200,"d":120}}
+{"op":"part","id":"stand","kind":"post","on":"bench.top","at":[-62,-8],"params":{"height":196}}
+{"op":"part","id":"arm","kind":"arm","on":"stand.top","params":{"length":96,"toward":"x"}}
+{"op":"value","name":"masses","label":"Slotted masses on the hanger","min":0,"max":5,"initial":1,"integer":true}
+{"op":"derive","name":"stretch","expr":"masses * 0.05 * g / 40 * 1000","unit":"mm"}
+{"op":"part","id":"spring","kind":"spring","on":"arm.tip","params":{"rest":44,"turns":11,"radius":5.5},"bind":{"stretch":"stretch"}}
+{"op":"part","id":"hanger","kind":"mass_hanger","on":"spring.end","params":{"slots":5,"radius":12,"thickness":6},"bind":{"count":"masses"}}
+{"op":"part","id":"ruler","kind":"ruler","on":"bench.top","at":[46,-40],"params":{"height":150,"zero":87.5}}
+{"op":"part","id":"pointer","kind":"pointer","on":"hanger.side","params":{"dx":6,"dy":-30.5}}
+{"op":"readout","text":"{masses} × 50 g · stretch {stretch:0} mm"}
+{"op":"control","name":"set_masses","label":"Put masses on the hanger","input":{"count":{"type":"integer","min":0,"max":5}},"set":{"masses":"input.count"}}
+{"op":"touch","part":"hanger","control":"set_masses","input":{"count":"masses >= 5 ? 0 : masses + 1"}}
+{"op":"beat","say":"Here's a spring hanging from a stand, with one fifty gram mass on its hanger.","cues":[{"word":2,"focus":"spring"},{"word":11,"focus":"hanger"}]}
+{"op":"beat","say":"Watch the pointer on the ruler while I add two more.","cues":[{"word":3,"focus":"pointer"},{"word":9,"control":"set_masses","input":{"count":3}}]}
+{"op":"beat","speaker":"rookie","say":"Three masses stretch it three times as far as one did. That pattern is called Hooke's law.","cues":[{"word":4,"focus":"ruler"}]}
+{"op":"beat","speaker":"rookie","say":"Tap the masses to add another and guess where the pointer will land.","cues":[{"word":0,"focus":"hanger"}]}

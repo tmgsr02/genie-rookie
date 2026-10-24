@@ -1,0 +1,104 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #263849;
+  background: #f7f2e8;
+  -webkit-text-size-adjust: 100%;
+}
+* { box-sizing: border-box; }
+body { margin: 0 !important; padding: 0 !important; min-height: 0 !important; background: #f7f2e8 !important; color: #263849; }
+main { max-width: 720px; margin: auto; padding: 0 18px 24px; }
+header { padding: 4px 0 0; text-align: center; }
+header strong { font-size: 17px; font-weight: 650; letter-spacing: -.3px; }
+#drawing { margin: -2px -10px -4px; }
+svg { display: block; width: 100%; height: auto; max-height: 220px; }
+.instrument { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; line-height: 1.35; padding: 4px 0 10px; }
+.instrument > span { color: #626b70; }
+output { font-weight: 650; text-align: right; color: #357f79; }
+section { background: #eee9de; border: 1px solid #e2ddcf; border-radius: 18px; padding: 13px 14px; margin: 0 0 14px; }
+.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .5px; color: #526a70; text-transform: lowercase; }
+.eyebrow::first-letter { text-transform: uppercase; }
+#prompt { margin: 5px 0 12px; font-size: 18px; line-height: 1.32; font-weight: 600; overflow-wrap: anywhere; }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.choices > button { flex: 1 1 auto; }
+.choices > p { margin: 0; font-size: 14px; line-height: 1.45; }
+button { min-height: 44px; padding: 10px 12px; border-radius: 12px; border: 1px solid #cccfc9; background: #fffdf8; color: #263849; font: inherit; font-size: 14px; line-height: 1.25; cursor: pointer; touch-action: manipulation; }
+button:active { background: #e2e8df; }
+button.primary { background: #357f79; border-color: #357f79; color: white; font-weight: 650; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid #617cc4; outline-offset: 3px; }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; flex-wrap: wrap; }
+fieldset { padding: 0; border: 0; margin: 0; min-width: 0; }
+legend { font-size: 14px; font-weight: 650; margin-bottom: 6px; }
+label { font-size: 13px; }
+input[type=range] { min-height: 44px; margin: 0; width: 100%; accent-color: #357f79; }
+.buttons { display: grid; grid-template-columns: 1fr 1fr; }
+summary { display: list-item; min-height: 44px; padding: 13px 0; font-size: 13px; cursor: pointer; }
+.utility { margin-top: 6px; justify-content: flex-start; }
+.utility button { font-size: 12px; background: transparent; }
+.bench-notes { margin-top: 8px; border-top: 1px solid #dedccf; }
+.facts, .caption { font-size: 12px; line-height: 1.5; color: #626b70; margin: 8px 0 0; }
+#connection:empty { display: none; }
+#connection { color: #7b5a2a; }
+textarea { width: 100%; min-height: 80px; border: 1px solid #bcc8c2; border-radius: 12px; padding: 12px; background: #fffdf8; color: #263849; font: inherit; font-size: 16px; margin-top: 4px; }
+@media (max-width: 350px) {
+  main { padding-inline: 14px; }
+  header strong { font-size: 16px; }
+  #prompt { font-size: 17px; }
+  .instrument { font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+
+/* The live mathematical apparatus uses the workshop's warm wood and teal metal. */
+.iso[data-theme="light"] {
+  --anatomy-paper: #e1d5b8;
+  --anatomy-top: #eee5d0;
+  --anatomy-hi: #263849;
+  --anatomy-mid: #677c77;
+  --anatomy-lo: #81918a;
+  --anatomy-faint: #a3aaa0;
+  --anatomy-shade-0: #b4bca8;
+  --anatomy-shade-1: #c6ccb9;
+  --anatomy-shade-2: #d3d6c3;
+  --anatomy-shade-3: #e3dfc9;
+  --anatomy-weight: .9px;
+}
+#beam, #pivot {
+  --anatomy-top: #b6cfbf;
+  --anatomy-paper: #91b5a3;
+  --anatomy-shade-0: #658f80;
+  --anatomy-shade-1: #7ca494;
+  --anatomy-shade-2: #91b4a0;
+  --anatomy-shade-3: #a5c2ad;
+}
+#left_carrier, #right_carrier {
+  --anatomy-top: #edc97e;
+  --anatomy-paper: #d8a34b;
+  --anatomy-shade-0: #bd8c42;
+  --anatomy-shade-1: #c79b52;
+  --anatomy-shade-2: #d5ad63;
+  --anatomy-shade-3: #e1bd76;
+}
+.highlight .iso-edge { stroke: #357f79; stroke-width: 2; }
+
+/* Compact phones keep the experiment's primary actions above the voice shelf. */
+@media (max-width: 500px) {
+  svg { max-height: 160px; }
+  header { display: none; }
+  .instrument { padding-bottom: 7px; }
+  section { padding: 9px 12px; margin-bottom: 8px; border-radius: 16px; }
+  #prompt { font-size: 17px; margin: 4px 0 8px; }
+  section:has(.choices:empty) #prompt { margin-bottom: 0; }
+  #controls > legend {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+.choices:empty { display: none; }
+[hidden] { display: none !important; }

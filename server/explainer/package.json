@@ -1,0 +1,36 @@
+{
+  "name": "genie-rookie-explainer",
+  "version": "1.0.0",
+  "description": "Ephemeral tutoring planner and OpenAI-hosted scene authoring service",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "node --test test/browser.test.mjs",
+    "verify:worker": "node scripts/worker-preflight.mjs",
+    "verify:live": "node --env-file-if-exists=.env scripts/live-smoke.mjs",
+    "setup:hosted": "node --env-file-if-exists=.env scripts/setup-hosted.mjs",
+    "verify:hosted": "node --env-file-if-exists=.env scripts/hosted-smoke.mjs",
+    "build:engine": "node engine/build.mjs",
+    "build:cloudflare": "node engine/build.mjs && node scripts/build-cloudflare-hosted-assets.mjs",
+    "deploy:cloudflare": "wrangler deploy",
+    "verify:cloudflare": "node scripts/cloudflare-smoke.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": {
+    "@openai/codex-sdk": "0.164.0",
+    "ajv": "8.20.0",
+    "openai": "7.43.0",
+    "playwright": "1.64.1"
+  },
+  "private": true,
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  }
+}

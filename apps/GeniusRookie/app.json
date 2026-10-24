@@ -1,0 +1,11 @@
+{
+  "display_name": "Genie & Rookie",
+  "bundle_id": "com.migueltwahirwa.geniusrookie",
+  "version": "0.1.0",
+  "build": "1",
+  "services": {
+    "managed_access": true,
+    "tutor_url": "https://genie-rookie-demo.genie-rookie.workers.dev",
+    "boson_proxy_url": "https://genie-rookie-demo.genie-rookie.workers.dev"
+  }
+}

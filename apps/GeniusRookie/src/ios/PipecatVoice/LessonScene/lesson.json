@@ -1,0 +1,220 @@
+{
+  "schema_version": "1.0",
+  "lesson_id": "balance_01",
+  "title": "Can a little weight balance a big one?",
+  "age_band": {
+    "min": 7,
+    "max": 10,
+    "status": "design_assumption"
+  },
+  "estimated_minutes": [
+    5,
+    8
+  ],
+  "review_status": "draft_requires_science_and_family_review",
+  "objectives": [
+    "Notice that distance from the pivot changes a weight's turning effect.",
+    "Balance unequal weights by changing their positions.",
+    "Explain a new arrangement using both weight and distance."
+  ],
+  "characters": {
+    "genius": "Ask one useful question and use observed model results.",
+    "rookie": "Make a tentative testable guess, then revise it from evidence."
+  },
+  "misconception": {
+    "hypothesis": "The side with more blocks must always go down.",
+    "resolution": "Where the blocks are placed also matters."
+  },
+  "scene": {
+    "id": "balance_bench",
+    "version": "0.1.0",
+    "format": "standalone_html_svg",
+    "authoring_skill": "anatomy",
+    "initial_review_status": "built_unreviewed",
+    "entities": [
+      "left_carrier",
+      "right_carrier",
+      "beam",
+      "pivot"
+    ],
+    "limits": {
+      "block_count": {
+        "min": 1,
+        "max": 4,
+        "integer": true
+      },
+      "distance": {
+        "min": 1,
+        "max": 4,
+        "integer": true
+      }
+    },
+    "model": {
+      "type": "ideal_centered_balance",
+      "left_score": "left_count * left_distance",
+      "right_score": "right_count * right_distance",
+      "result": "left_score == right_score ? balanced : left_score > right_score ? left_down : right_down",
+      "assumptions": [
+        "Identical blocks in uniform gravity",
+        "Symmetric beam centered at the pivot",
+        "Negligible friction",
+        "Distances measured from pivot in equal units"
+      ],
+      "rendering_note": "Bounded eased tilt illustrates direction only. Reset each trial to horizontal before release. Do not represent the angle as a physical measurement or integrate an unverified dynamics model."
+    },
+    "initial_state": {
+      "scene_version": 0,
+      "left_count": 3,
+      "left_distance": 1,
+      "right_count": 1,
+      "right_distance": 1,
+      "paused": false
+    }
+  },
+  "phases": [
+    "wonder",
+    "predict",
+    "experiment",
+    "observe",
+    "explain",
+    "transfer",
+    "finish"
+  ],
+  "steps": [
+    {
+      "id": "wonder",
+      "phase": "wonder",
+      "prompt": "Could one block balance three?",
+      "action": "show_initial_state"
+    },
+    {
+      "id": "predict",
+      "phase": "predict",
+      "prompt": "What might happen if we move the single block farther from the middle?",
+      "choices": [
+        "It could balance",
+        "It will still tip left",
+        "I'm not sure"
+      ],
+      "expected_answer": "do_not_grade_prediction"
+    },
+    {
+      "id": "experiment",
+      "phase": "experiment",
+      "prompt": "Try moving the single block one notch farther.",
+      "permitted_actions": [
+        "move_weight",
+        "reset_experiment"
+      ]
+    },
+    {
+      "id": "observe",
+      "phase": "observe",
+      "trigger": "balanced",
+      "prompt": "What do you notice now?",
+      "wait_for_child": true
+    },
+    {
+      "id": "explain",
+      "phase": "explain",
+      "prompt": "Can you tell Rookie why moving the block helped?",
+      "rubric": {
+        "recognizes_distance": "The child mentions being farther from the middle or pivot.",
+        "connects_weight_and_distance": "The child connects how much weight with where it is placed.",
+        "uncertain_transcript": "Do not grade; offer a tap or a demonstration."
+      }
+    },
+    {
+      "id": "transfer",
+      "phase": "transfer",
+      "setup": {
+        "left_count": 2,
+        "left_distance": 2,
+        "right_count": 1,
+        "right_distance": 3
+      },
+      "prompt": "Can you balance this arrangement by moving the single block?",
+      "solution": {
+        "right_distance": 4
+      }
+    },
+    {
+      "id": "finish",
+      "phase": "finish",
+      "prompt": "Both the weight and its distance from the middle matter.",
+      "summary_fields": [
+        "experiment_tried",
+        "explanation_with_or_without_hint",
+        "transfer_attempted"
+      ]
+    }
+  ],
+  "worked_states": [
+    {
+      "name": "initial",
+      "left_count": 3,
+      "left_distance": 1,
+      "right_count": 1,
+      "right_distance": 1,
+      "expected_left_score": 3,
+      "expected_right_score": 1,
+      "expected_outcome": "left_down"
+    },
+    {
+      "name": "first_discovery",
+      "left_count": 3,
+      "left_distance": 1,
+      "right_count": 1,
+      "right_distance": 3,
+      "expected_left_score": 3,
+      "expected_right_score": 3,
+      "expected_outcome": "balanced"
+    },
+    {
+      "name": "transfer_start",
+      "left_count": 2,
+      "left_distance": 2,
+      "right_count": 1,
+      "right_distance": 3,
+      "expected_left_score": 4,
+      "expected_right_score": 3,
+      "expected_outcome": "left_down"
+    },
+    {
+      "name": "transfer_solution",
+      "left_count": 2,
+      "left_distance": 2,
+      "right_count": 1,
+      "right_distance": 4,
+      "expected_left_score": 4,
+      "expected_right_score": 4,
+      "expected_outcome": "balanced"
+    },
+    {
+      "name": "right_down_check",
+      "left_count": 1,
+      "left_distance": 1,
+      "right_count": 2,
+      "right_distance": 2,
+      "expected_left_score": 1,
+      "expected_right_score": 4,
+      "expected_outcome": "right_down"
+    }
+  ],
+  "invariants": [
+    "Counts and distances remain integers within the declared limits.",
+    "Readout, narration facts and visible direction use the same computed result.",
+    "Every mutation checks expected_scene_version and increments scene_version.",
+    "An action_id is applied at most once.",
+    "A manual drag invalidates queued explanations based on an older scene state."
+  ],
+  "sources": [
+    "https://www.sciencebuddies.org/stem-activities/give-it-a-lift-with-a-lever",
+    "https://scienceinschool.org/article/2017/balancing-act-physics-levers/"
+  ],
+  "usage": "legacy_balance_regression_fixture",
+  "product_scope": "Open-ended tutoring accepts arbitrary runtime questions. This fixture is not a lesson catalogue or required teaching sequence.",
+  "production_routing": false,
+  "contract_note": "This legacy fixture uses scene_version as its mutation counter. Generated explainer packages instead separate scene_version from state_revision; use the service tool/runtime schemas.",
+  "phases_policy": "Optional fixture-only sequence; not the open-ended planner policy."
+}

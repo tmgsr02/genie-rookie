@@ -1,0 +1,71 @@
+[
+  [
+    "wait",
+    700
+  ],
+  [
+    "eval",
+    "window.beforePause=document.getElementById('tilt').getAttribute('transform');document.getElementById('pause').click();if(document.getElementById('tilt').getAttribute('transform')!==window.beforePause)throw Error('Pause changed pose');'pause keeps pose'"
+  ],
+  [
+    "eval",
+    "window.lessonUpdate({lesson_session:'authoring-preview',phase:'observe',prompt:'Level'});if(!document.getElementById('reset').disabled)throw Error('Reset active while observing');'reset locked during observation'"
+  ],
+  [
+    "eval",
+    "window.lessonUpdate({lesson_session:'authoring-preview',phase:'experiment',prompt:'Try'});document.getElementById('pause').click();'experiment resumed'"
+  ],
+  [
+    "click",
+    "#outward"
+  ],
+  [
+    "click",
+    "#outward"
+  ],
+  [
+    "wait",
+    400
+  ],
+  [
+    "eval",
+    "if(!document.getElementById('readout').textContent.includes('Balanced'))throw Error('Expected balance');'touch reaches balance'"
+  ],
+  [
+    "key",
+    "ArrowLeft",
+    "#distance"
+  ],
+  [
+    "wait",
+    400
+  ],
+  [
+    "eval",
+    "if(!document.getElementById('readout').textContent.includes('Left side'))throw Error('Keyboard not connected');'keyboard moves carrier'"
+  ],
+  [
+    "eval",
+    "window.lessonUpdate({lesson_session:'authoring-preview',phase:'finish',prompt:'Done'});if(document.querySelector('#choices button'))throw Error('Child-facing restart remains');if(!document.getElementById('choices').textContent.includes('grown-up'))throw Error('Missing grown-up restart guidance');'finish directs restart to grown-up settings'"
+  ],
+  [
+    "lines",
+    null,
+    "#drawing"
+  ],
+  [
+    "eval",
+    "document.body.dataset.theme='dark';'dark craft inspection'"
+  ],
+  [
+    "shot",
+    "apps/GeniusRookie/scene_authoring/dark-detail.png",
+    "#drawing",
+    4
+  ],
+  [
+    "lines",
+    null,
+    "#drawing"
+  ]
+]

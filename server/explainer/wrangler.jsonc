@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "genie-rookie-demo",
+  "main": "cloudflare/index.mjs",
+  "compatibility_date": "2026-10-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {"enabled": true, "head_sampling_rate": 0.1, "traces": {"enabled": true, "head_sampling_rate": 0.1}},
+  "vars": {
+    "PUBLIC_DEMO_ENABLED": "true",
+    "DEMO_DAILY_GENERATIONS": "40",
+    "DEMO_DAILY_PLANNER_TURNS": "300",
+    "DEMO_DAILY_SPEECH_CHARACTERS": "100000",
+    "MAX_PENDING_JOBS": "12",
+    "HOSTED_AUTHOR_MODE": "direct",
+    "PLANNER_MODEL": "gpt-5.4-mini",
+    "HOSTED_AUTHOR_MODEL": "gpt-5.4",
+    "HOSTED_AUTHOR_REASONING": "medium",
+    "HOSTED_VALIDATOR_MODEL": "gpt-5.4-mini",
+    "DESCRIBER_MODE": "isometric",
+    "DESCRIBER_MODEL": "gpt-5.4-mini",
+    "DESCRIBER_REASONING": "low"
+  },
+  "durable_objects": {"bindings": [
+    {"name": "TUTOR", "class_name": "TutorObject"},
+    {"name": "VOICE", "class_name": "VoiceObject"}
+  ]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["TutorObject", "VoiceObject"]}],
+  "workflows": [{"name": "genie-rookie-generation", "binding": "GENERATION", "class_name": "GenerationWorkflow"}],
+  "r2_buckets": [{"binding": "HOSTED_ASSETS", "bucket_name": "genie-rookie-hosted-assets"}]
+}

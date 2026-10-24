@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Genius &amp; Rookie — Balance workshop</title>
+<link rel="stylesheet" href="iso.css">
+<link rel="stylesheet" href="workshop.css">
+</head>
+<body class="iso" data-theme="light">
+<main>
+<header><strong>Can one balance three?</strong></header>
+<div id="drawing"></div>
+<div class="instrument"><span>Watch which side tips.</span><output id="readout" aria-live="polite">Preparing the bench…</output></div>
+<section aria-labelledby="phase">
+    <div class="eyebrow" id="phase">WONDER</div>
+    <p id="prompt" role="status">Could one block balance three? Let’s test it.</p>
+    <div id="choices" class="choices"></div>
+</section>
+<fieldset id="controls">
+    <legend>Try it on the bench</legend>
+    <div class="row buttons"><button id="inward">One notch closer</button><button id="outward">One notch farther</button></div>
+    <div class="row"><label for="distance">Right block position · notch <b id="notch">1</b></label><input id="distance" type="range" min="1" max="4" value="1" step="1" aria-label="Right carrier distance from middle"></div>
+    <details><summary>More bench controls</summary>
+        <div class="row"><label for="leftdistance">Left block position</label><input id="leftdistance" type="range" min="1" max="4" value="1" step="1"></div>
+        <div class="row"><label for="leftcount">Left blocks</label><input id="leftcount" type="range" min="1" max="4" value="3" step="1"></div>
+        <div class="row"><label for="rightcount">Right blocks</label><input id="rightcount" type="range" min="1" max="4" value="1" step="1"></div>
+    </details>
+</fieldset>
+<div class="row utility"><button id="reset">Reset experiment</button><button id="pause" aria-pressed="false">Pause motion</button></div>
+<details class="bench-notes"><summary>About this experiment</summary>
+    <p id="facts" class="facts"></p>
+    <p class="caption">Same blocks, equal notches, a centered beam. Tilt shows which side turns down; the angle is an illustration.</p>
+</details>
+<p class="caption authoring">Ages 7–10 is a design assumption. This lesson awaits science and family review.</p>
+<p class="caption" id="connection"></p>
+</main>
+<script src="kit.js"></script><script src="geometry.js"></script><script src="model.js"></script><script src="scene.js"></script>
+</body>
+</html>

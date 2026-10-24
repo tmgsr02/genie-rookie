@@ -1,0 +1,1475 @@
+import AVFoundation
+import Foundation
+import NaturalLanguage
+import Observation
+import OSLog
+
+/// An event from Python (see `AppleNativeBridge` in `src/python/pipecat_apple/bridge.py`).
+private struct ExplainerBasis: Decodable {
+    let scene_id: String
+    let scene_version: Int
+    let state_revision: Int
+    @MainActor func matches(_ scene: ExplainerRuntime?) -> Bool {
+        guard let scene else { return false }
+        return scene.package.sceneID == scene_id && scene.package.version == scene_version && scene.revision == state_revision
+    }
+}
+
+private struct NativeEvent: Decodable {
+    let type: String
+    var operation: String?
+    var request: String?
+    var turn: String?
+    var session: String?
+    var state: String?
+    var text: String?
+    var prompt: String?
+    var instructions: String?
+    var history: [HistoryMessage]?
+    var heard: [[String: String]]?
+    var basis: ExplainerBasis?
+    var message: String?
+    var recoverable: Bool?
+    // A speak request's character, voice and line within its turn.
+    var speaker: String?
+    var voice: String?
+    var line: Int?
+    // An Audience request's inputs, rendered by the Audience runtime in Python.
+    var cards: [String]?
+    var utterance: String?
+    var current: Int?
+    var people: [[Float]]?
+    var features: [Float]?
+    /// Who a line is for (`addressed`): character ids, or the human's.
+    var to: [String]?
+}
+
+/// An RTVI message from Python, in its session envelope.
+private struct RTVIEnvelope: Decodable {
+    let type: String
+    let turn: String?
+    let session: String?
+    /// For a character's line: who says it, and which line of the turn it is.
+    let speaker: String?
+    let line: Int?
+    let message: Message
+    struct Message: Decodable {
+        let type: String
+        let data: Payload?
+    }
+    struct Payload: Decodable {
+        let text: String?
+        let final: Bool?
+    }
+}
+
+/// The microphone: recognized words, speech confidence and level (`AppleSpeechRecognizer`, or a
+/// DEBUG script).
+@MainActor
+protocol SpeechInput: AnyObject {
+    /// Recognized words, whether they are final, and their start and end on the input's clock.
+    var onTranscript: ((String, Bool, Double, Double) -> Void)? { get set }
+    /// Speech confidence, its time on the input's clock, and the input's normalized volume.
+    var onVAD: ((Double, Double, Double) -> Void)? { get set }
+    var onLevel: ((Double) -> Void)? { get set }
+    var onError: ((String) -> Void)? { get set }
+    /// Hold to talk: recognize only while the microphone is held. Set before `start`.
+    var holdsToTalk: Bool { get set }
+    /// Load the recognizer's model ahead of `start`, without the microphone.
+    func prepare() async
+    /// Start listening on a fresh clock.
+    func start() async throws
+    func stop() async
+    /// Hold to talk: start recognizing as the microphone is pressed, from a moment before unless
+    /// `preRoll` is false, or finalize the speech and stop as it is released.
+    func listen(_ on: Bool, preRoll: Bool) async throws
+    /// Deliver every final result for the speech so far, then return.
+    func finalize() async throws
+    func logAudioMetrics(stage: String)
+}
+
+/// Writes Python's `generate` requests (`AppleLanguageModel`, or a DEBUG script).
+@MainActor
+protocol TextGenerator: AnyObject {
+    /// Why the model cannot be used now, as the screen shows it; nil when it can.
+    var unavailableReason: String? { get }
+    func invalidate()
+    func prepare(instructions: String, history: [HistoryMessage]) async
+    func generate(prompt: String, instructions: String, history: [HistoryMessage],
+                  onDelta: (String) -> Void) async throws
+}
+
+extension AppleSpeechRecognizer: SpeechInput {}
+
+extension AppleLanguageModel: TextGenerator {
+    var unavailableReason: String? { Self.unavailableReason }
+}
+
+/// The conversation: the session's lifecycle, the native work Python asks for (generating,
+/// speaking, Audience readings, speech endpoints), and what the screen shows of each turn.
+@MainActor @Observable
+final class ConversationModel {
+    private(set) var ready = false
+    private(set) var active = false
+    /// Typed conversations play real replies without opening or authorizing the microphone.
+    private var outputOnly = false
+    private var pendingQuestion: Task<Void, Never>?
+    private(set) var muted = false
+    /// How conversations take the human's turns, from Settings.
+    private(set) var inputMode = InputMode.load()
+    /// This conversation listens only while the microphone is held.
+    private(set) var holdsToTalk = false
+    /// The human holds the microphone in a hold-to-talk conversation.
+    private(set) var talking = false
+    /// A push to talk is being heard: from the press, once the microphone is ready, until a
+    /// moment after the release.
+    private(set) var hearing = false
+    /// The microphone was tapped rather than held, so it shows how to talk.
+    private(set) var showsHoldHint = false
+    /// The conversations kept on the device, to read again.
+    let history = ConversationArchive()
+    /// Whether conversations are kept, from Settings.
+    private(set) var savesConversations = HistorySettings.load()
+    /// Setting up audio, speech and models: as a conversation starts, and after an audio route change.
+    private(set) var preparing = false
+    /// Loading the voices, Audience and speech recognition as the app opens or returns.
+    private var warming = false
+    /// Python or the models are loading, which a conversation waits for.
+    var loading: Bool { !ready || warming }
+    private(set) var userLevel = 0.0
+    /// `userLevel` without observation, for the stage's per-frame sampling.
+    var unobservedUserLevel: Double { _userLevel }
+    var error: String?
+    /// The banner's text: Release builds drop the trailing diagnostic code (`[LLM_DECLINED]`).
+    var errorMessage: String? {
+        #if DEBUG
+        error
+        #else
+        error.map { $0.replacing(#/\s*[\[(][A-Z][A-Z0-9_]+[\])]\s*$/#, with: "") }
+        #endif
+    }
+    var showSettings = false
+    /// Why the language model cannot be used, for Settings; nil when it can.
+    private(set) var availability: String?
+    private(set) var userProfile = ProfileSettings.load()
+    /// Something has been said since the conversation was last cleared.
+    private(set) var hasConversation = false
+    /// The character whose line is being heard: from its first audio until the next line starts,
+    /// or until the exchange has ended and played out.
+    private(set) var floor: DuoCharacter?
+    /// Who the line being heard is for: the human's question until a character answers, then each
+    /// character's line as it plays.
+    private(set) var addressed: Set<DuoCharacter> = []
+    /// The sentence the speaker is saying: shown as its audio starts, and gone once someone else
+    /// speaks or they have been quiet for `captionHold`.
+    private(set) var captions: [DuoCharacter: String] = [:]
+    /// Lip-sync for each character's mouth, analyzed from their audio as it is scheduled.
+    let mouths = Dictionary(uniqueKeysWithValues: DuoCharacter.allCases.map { ($0, LipsyncTimeline()) })
+    /// Counts playback stopping early while a character holds the floor; the stage startles at each.
+    private(set) var interruptions = 0
+    /// Reactions asked of the characters, which the stage plays as each is added.
+    private(set) var reactions: [StageReaction] = []
+
+    /// The audio session for choosing a microphone in Settings, between conversations.
+    func sessionForMicrophoneChoice() -> AVAudioSession? { active ? nil : audio.sessionForInputChoice() }
+
+    /// The human's words this turn, as they are recognized, until a character answers.
+    var userLine: UserTranscript? {
+        guard currentTurn != nil, !exchangeOver, heardLine == nil, !userTranscript.text.isEmpty else {
+            return nil
+        }
+        return userTranscript
+    }
+
+    /// A character is thinking while they write a line and someone else has the floor.
+    func isThinking(_ character: DuoCharacter) -> Bool {
+        floor != character && writing.values.contains(character)
+    }
+
+    /// A character's mouth `ahead` seconds past the current playback position: the stage asks for
+    /// the pose when its frame will be presented.
+    func mouthPose(for character: DuoCharacter, ahead: Double) -> LipsyncTimeline.Pose {
+        mouths[character]?.pose(at: player.playbackTime.map { $0 + ahead }) ?? LipsyncTimeline.rest
+    }
+
+    let lesson = LessonSceneBridge()
+    let explainer = ExplainerController()
+    var legacyLesson: Bool {
+        ProcessInfo.processInfo.arguments.contains("--lesson-smoke") || ProcessInfo.processInfo.arguments.contains("--lesson-review")
+    }
+
+    func submitQuestion(_ text: String) {
+        let question = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        guard ready else { error = "Your tutor is starting. Try your question again in a moment."; return }
+        hasConversation = true
+        explainer.userInteracted()
+        pendingQuestion?.cancel()
+        if !active { start(holdingToTalk: true, outputOnly: true) }
+        guard active else { return }
+        let generation = sessionGeneration
+        let preparation = sessionTask
+        pendingQuestion = Task {
+            await preparation?.value
+            guard !Task.isCancelled, active, sessionGeneration == generation else { return }
+            interruptReply()
+            sendSession(["type": "text_input", "text": question])
+        }
+    }
+
+    private func receiveExplainerDialogue(_ response: [String: Any]) {
+        let dialogue = response["dialogue"] as? [[String: Any]] ?? []
+        guard !dialogue.isEmpty else { return }
+        // A stopped/background conversation must not silently treat displayed text as heard.
+        guard active, !hearing, !talking else { return }
+        if response["automatic_generation_dialogue"] as? Bool == true, !canHaveGenerationConversation { return }
+        var payload = response
+        payload["type"] = "explainer_dialogue"
+        payload["request_id"] = UUID().uuidString
+        sendSession(payload)
+    }
+    private var canHaveGenerationConversation: Bool {
+        active && !muted && !preparing && !isRecoveringAudio && !hearing && !talking &&
+        !playing && floor == nil && speechRequest == nil && requests.isEmpty &&
+        writing.isEmpty && (currentTurn == nil || exchangeOver)
+    }
+    private let runtime = PCPythonRuntime()
+    private let audio: VoiceAudioEngine
+    private let speech: SpeechInput
+    let speechProviders: SpeechProviderRouter = {
+        HostedServiceConfiguration.prepareForManagedLaunch()
+        return SpeechProviderRouter(
+        voices: SpeechVoiceMap(
+            boson: Dictionary(uniqueKeysWithValues: DuoCharacter.allCases.map { ($0.rawValue, $0.rawValue) }),
+            phonon: Dictionary(uniqueKeysWithValues: DuoCharacter.allCases.map { ($0.rawValue, $0.voice) })),
+        boson: HiggsSynthesizer(appID: "genius-rookie"), phonon: PhononProviderBackend())
+    }()
+    private(set) var voiceFailure: String?
+    private(set) var failedProvider: SpeechProvider?
+
+    func selectSpeechProvider(_ provider: SpeechProvider) {
+        // Interrupt the inherited pipeline, retaining heard Room history and product state.
+        interruptReply()
+        cancelRequests()
+        resetStage()
+        warmup?.cancel()
+        warmup = nil
+        warming = false
+        voiceFailure = nil
+        failedProvider = nil
+        Task {
+            let selectionGeneration = speechProviders.generation &+ 1
+            let success = await speechProviders.select(provider)
+            guard speechProviders.generation == selectionGeneration else { return }
+            // Superseded selections return false without publishing an error.
+            if !success, speechProviders.preparingProvider == nil,
+               let message = speechProviders.errorMessage {
+                voiceFailure = message
+                failedProvider = provider
+            }
+        }
+    }
+    private let player: PCMPlayer
+    private let audience = AudienceRunner()
+    private let languageModel: TextGenerator
+    private let modelWork = NativeModelWorkCoordinator()
+    private let logger = Logger(subsystem: "ai.pipecat.littlevoices", category: "Conversation")
+    private var languageModelRequest: String?
+    private var requests: [String: Task<Void, Never>] = [:]
+    private var speechRequest: String?
+    private var currentTurn: String?
+    private var userTranscript = UserTranscript()
+    /// The character whose audio is playing, while some is: its samples drive their mouth.
+    private var speakingCharacter: DuoCharacter?
+    private var playing = false
+    private var sessionTask: Task<Void, Never>?
+    private var captureTask: Task<Void, Never>?
+    private var pressedAt: ContinuousClock.Instant?
+    /// This conversation's transcript, while it is being kept.
+    private var recorder: TranscriptRecorder?
+    private var releaseTask: Task<Void, Never>?
+    private var hintTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+    /// The voices, Audience and speech recognition loading, or loaded, for conversations to come.
+    private var warmup: Task<Void, Error>?
+    /// Freeing the voices and Audience in the background; the next load waits for it.
+    private var cooldown: Task<Void, Never>?
+    /// The launch intro still plays: the models wait for it, so loading them doesn't take its frames.
+    private var awaitingIntro = true
+    /// Between `becomeActive` and `enterBackground`.
+    private var inFront = false
+    private var sessionGeneration = UUID()
+    private var captureGeneration = UUID()
+    private var inputReady = false
+    private var isRecoveringAudio = false
+    private var routeRestarting = false
+    private var configuredAudioRoute = ""
+    /// The number of the turn's line being heard. Lines play in order, so every line before it
+    /// has been heard or never will be.
+    private var heardLine: Int?
+    /// The turn's lines being written that have not started playing, with their speakers.
+    private var writing: [Int: DuoCharacter] = [:]
+    /// Who each of the turn's lines not yet heard is for.
+    private var lineAddressees: [Int: Set<DuoCharacter>] = [:]
+    /// The turn's exchange has ended: the floor is the human's once its last line has played.
+    private var exchangeOver = false
+    /// Clears the captions once playback has been quiet for `captionHold`.
+    private var captionExpiry: Task<Void, Never>?
+    /// How long a caption stays after its sentence has played, so a speaker's next sentence
+    /// replaces it rather than following a gap.
+    private static let captionHold: Duration = .seconds(2)
+    #if DEBUG
+    /// A scripted run (`--preview-duo`, `--demo-question`), standing in for the microphone and,
+    /// in a preview, the language model.
+    private let script: ConversationScript?
+    /// A launch check is timing models it loads itself, so the app loads none alongside.
+    private var checking = false
+    #endif
+
+    init() {
+        let audio = VoiceAudioEngine()
+        self.audio = audio
+        player = PCMPlayer(audio: audio)
+        #if DEBUG
+        script = ConversationScript.launchRequested(audio: audio)
+        speech = script?.microphone ?? AppleSpeechRecognizer(audio: audio)
+        let scriptedLines: TextGenerator? = script?.lines
+        languageModel = scriptedLines ?? AppleLanguageModel()
+        #else
+        speech = AppleSpeechRecognizer(audio: audio)
+        languageModel = AppleLanguageModel()
+        #endif
+        availability = legacyLesson ? languageModel.unavailableReason : nil
+        speech.onTranscript = { [weak self] text, final, start, end in
+            guard let self, active, !muted, inputReady else { return }
+            sendSession(["type": "transcription", "text": text, "final": final, "start": start, "end": end])
+        }
+        speech.onVAD = { [weak self] confidence, time, volume in
+            guard let self, active, !muted, inputReady, !holdsToTalk else { return }
+            sendSession(["type": "vad", "confidence": confidence, "time": time, "volume": volume])
+        }
+        speech.onLevel = { [weak self] value in
+            guard let self, active, !muted, inputReady, !holdsToTalk || hearing else { return }
+            userLevel = value
+        }
+        speech.onError = { [weak self] message in self?.fail(message) }
+        player.onSpeakingChanged = { [weak self] speaking in
+            guard let self else { return }
+            playing = speaking
+            guard let request = speechRequest else { return }
+            sendSession(["type": "playback", "request": request, "speaking": speaking])
+        }
+        player.onScheduled = { [weak self] samples, start in
+            guard let self, let speaker = speakingCharacter else { return }
+            mouths[speaker]?.schedule(samples, at: start)
+        }
+        player.onPlaybackEnded = { [weak self] interrupted in
+            guard let self else { return }
+            for mouth in mouths.values {
+                if interrupted { mouth.cancel() } else { mouth.finish() }
+            }
+            speakingCharacter = nil
+            expireCaptions()
+            if interrupted, floor != nil { interruptions &+= 1 }
+            // Between sentences and lines the floor stays with the speaker.
+            if interrupted || exchangeOver { floor = nil }
+            if exchangeOver { addressed = [] }
+        }
+        explainer.canConverse = { [weak self] in self?.canHaveGenerationConversation == true }
+        explainer.onDialogue = { [weak self] response in self?.receiveExplainerDialogue(response) }
+        explainer.onInvalidate = { [weak self] in
+            guard let self else { return }
+            captionExpiry?.cancel(); captions.removeAll()
+            guard active else { return }
+            if !hearing && !talking { interruptReply() }
+            var event: [String: Any] = ["type": "explainer_invalidate"]
+            if let basis = explainer.activeScene?.basis { event["basis"] = basis }
+            sendSession(event)
+        }
+        lesson.onEvent = { [weak self] event in
+            guard let self else { return }
+            // A touch trial invalidates prefetched explanations and queued speech immediately.
+            if let kind = event["kind"] as? String,
+               ["scene_result", "continue", "prediction", "explanation", "reset", "restart"].contains(kind), active { interruptReply() }
+            send(event)
+        }
+        // The runtime calls back on the main queue.
+        runtime.start { [weak self] json in
+            MainActor.assumeIsolated { self?.handle(json) }
+        }
+        #if DEBUG
+        runLaunchDiagnostics()
+        #endif
+        // The system deactivates the session for interruptions such as calls. The
+        // app's own deactivation when a conversation ends is not an interruption.
+        NotificationCenter.default.addObserver(forName: AVAudioSession.didBecomeInactiveNotification,
+            object: nil, queue: .main) { [weak self] notification in
+                guard let context = notification.userInfo?[AVAudioSession.deactivationContextKey]
+                        as? AVAudioSession.DeactivationContext,
+                      context.source == .system else { return }
+                MainActor.assumeIsolated {
+                    guard let self, self.active else { return }
+                    self.fail("The conversation ended when another app or a call took over the audio. Tap the "
+                        + "microphone to start again.")
+                }
+            }
+        NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.audioRouteChanged()
+                }
+            }
+    }
+
+    func saveSettings(preferredName: String, inputMode: InputMode, savesConversations: Bool) throws {
+        guard !active else { throw VoiceError(message: "End the conversation before changing settings.") }
+        let profile = UserProfile(preferredName: preferredName)
+        try ProfileSettings.save(profile)
+        if profile != userProfile { invalidatePreparation() }
+        userProfile = profile
+        InputMode.save(inputMode)
+        self.inputMode = inputMode
+        HistorySettings.save(savesConversations)
+        self.savesConversations = savesConversations
+    }
+
+    /// Whether the microphone is held to talk: in this conversation, or in the next one.
+    var microphoneHolds: Bool { active && !outputOnly ? holdsToTalk : inputMode == .hold }
+
+    private func send(_ event: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: event),
+              let json = String(data: data, encoding: .utf8) else { return }
+        runtime.sendJSON(json)
+    }
+
+    private func sendSession(_ event: [String: Any]) {
+        send(event.merging(["session": sessionGeneration.uuidString]) { _, session in session })
+    }
+
+    // MARK: - The session
+
+    /// The app is in front: check the language model again, and load the voices, Audience and
+    /// speech recognition once the launch intro has played, so the microphone needn't wait for
+    /// them.
+    func becomeActive() {
+        inFront = true
+        refreshAvailability()
+        if !awaitingIntro { warmUp() }
+    }
+
+    /// The launch intro has played, or a conversation took it over.
+    func introEnded() {
+        guard awaitingIntro else { return }
+        awaitingIntro = false
+        refreshAvailability()
+        if inFront { warmUp() }
+    }
+
+    private func warmUp() {
+        #if DEBUG
+        if checking { return }
+        #endif
+        loadModels()
+    }
+
+    /// The app has gone to the background: the conversation ends, and the voices and Audience are
+    /// freed until it returns.
+    func enterBackground() {
+        inFront = false
+        stop()
+        #if DEBUG
+        if checking { return }
+        #endif
+        let warmup = self.warmup
+        self.warmup = nil
+        warming = false
+        cooldown = Task {
+            _ = await warmup?.result
+            await speechProviders.unload()
+            await audience.unload()
+        }
+    }
+
+    /// Check again whether the language model can be used. Once the intro has played, the banner
+    /// says why it can't before the microphone is pressed, and clears once it can.
+    private func refreshAvailability() {
+        let previous = availability
+        availability = legacyLesson ? languageModel.unavailableReason : nil
+        if let previous, error == previous, availability != previous { error = nil }
+        if !awaitingIntro, !active, error == nil, let availability { error = availability }
+    }
+
+    private func prepareAudienceIfNeeded() async throws {
+        if legacyLesson { try await audience.prepare() }
+    }
+
+    /// The voices, Audience and speech recognition, loading or loaded. Only Phonon failing fails
+    /// the load, which the next conversation tries again.
+    @discardableResult
+    private func loadModels() -> Task<Void, Error> {
+        if let warmup { return warmup }
+        warming = true
+        let cooldown = cooldown
+        let task = Task<Void, Error> {
+            await cooldown?.value
+            async let voices: Void = speechProviders.preparePreferred()
+            async let audienceReady: Void = prepareAudienceIfNeeded()
+            await speech.prepare()
+            do { try await audienceReady }
+            catch {
+                // Without the model, Python reads who each line is for with Audience's rules baseline.
+                logger.error("Pipecat Audience failed to load: \(error.localizedDescription, privacy: .public)")
+            }
+            do { try await voices }
+            catch {
+                if !(error is CancellationError) && !Task.isCancelled {
+                    voiceFailure = error.localizedDescription
+                    failedProvider = speechProviders.preferredProvider
+                }
+                logger.error("Speech provider failed to load: \(error.localizedDescription, privacy: .public)")
+                // Voice availability does not stop local recognition, touch or text input.
+            }
+        }
+        warmup = task
+        Task {
+            let result = await task.result
+            guard warmup == task else { return }
+            warming = false
+            if case .failure = result { warmup = nil }
+        }
+        return task
+    }
+
+    /// Start a conversation that listens throughout, or, `holdingToTalk`, only while the
+    /// microphone is held.
+    func start(holdingToTalk: Bool, outputOnly: Bool = false) {
+        if self.outputOnly, !outputOnly { stop() }
+        guard ready, !active else { return }
+        error = nil
+        refreshAvailability()
+        if let availability { error = availability; return }
+        let userName = userProfile.preferredName
+        invalidatePreparation()
+        active = true
+        self.outputOnly = outputOnly
+        muted = outputOnly
+        holdsToTalk = holdingToTalk
+        speech.holdsToTalk = holdingToTalk
+        recorder = savesConversations ? TranscriptRecorder() : nil
+        userLevel = 0
+        inputReady = false
+        preparing = true
+        let generation = UUID()
+        sessionGeneration = generation
+        let previousStop = stopTask
+        sessionTask = Task {
+            await previousStop?.value
+            do {
+                try Task.checkCancellation()
+                guard active, sessionGeneration == generation else { return }
+                if outputOnly { try audio.configurePlaybackSession() }
+                else { try audio.configureSession(preferring: MicrophonePreference.uid) }
+                // Planning and visual generation need not wait for voice/model warmup.
+                if outputOnly { loadModels() }
+                else { try await loadModels().value }
+                try Task.checkCancellation()
+                guard active, sessionGeneration == generation else { return }
+                var startEvent: [String: Any] = ["type": "start", "user_name": userName]
+                if let basis = explainer.activeScene?.basis { startEvent["explainer_basis"] = basis }
+                sendSession(startEvent)
+                if outputOnly { sendSession(["type": "mute"]) }
+                else { try await speech.start() }
+                try Task.checkCancellation()
+                guard active, sessionGeneration == generation else { return }
+                inputReady = !outputOnly
+                configuredAudioRoute = audioRouteSignature
+                preparing = false
+                // The microphone pressed to start the conversation is still held.
+                if talking { beginTalking() }
+            } catch is CancellationError { }
+            catch { if sessionGeneration == generation { fail(error.localizedDescription) } }
+        }
+    }
+
+    /// App Intents enter through the same permission and audio setup as the microphone button. A
+    /// conversation started by voice is hands-free.
+    func startFromShortcut() {
+        showSettings = false
+        if outputOnly { start(holdingToTalk: false); return }
+        if active {
+            if muted, !preparing { toggleMute() }
+            return
+        }
+        start(holdingToTalk: false)
+    }
+
+    // MARK: - Hold to talk
+
+    /// Held for less than this, the microphone was tapped.
+    private static let shortestHold: Duration = .milliseconds(300)
+    /// Listening goes on this long after the release, for a last word still being said.
+    private static let releaseTail: Duration = .milliseconds(350)
+
+    /// The microphone is pressed: in a hold-to-talk conversation, or to start one, the human
+    /// talks until it is released. Pressing cuts the characters off.
+    func pressMicrophone() {
+        if outputOnly { start(holdingToTalk: true) }
+        if !active {
+            guard inputMode == .hold else { return }
+            start(holdingToTalk: true)
+            guard active else { return }
+        }
+        guard holdsToTalk, !talking else { return }
+        explainer.userInteracted()
+        talking = true
+        pressedAt = .now
+        hintTask?.cancel()
+        showsHoldHint = false
+        if hearing {
+            // Pressed again within the release's tail: the same words go on.
+            releaseTask?.cancel()
+            releaseTask = nil
+        } else if inputReady, !isRecoveringAudio {
+            beginTalking()
+        }
+    }
+
+    /// The microphone is let go: a moment later the human's turn ends, or, if it was only
+    /// tapped, it shows how to talk.
+    func releaseMicrophone() {
+        guard talking else { return }
+        talking = false
+        if let pressedAt, pressedAt.duration(to: .now) < Self.shortestHold { showHoldHint() }
+        pressedAt = nil
+        guard hearing else { return }
+        let generation = sessionGeneration
+        releaseTask = Task {
+            try? await Task.sleep(for: Self.releaseTail)
+            guard !Task.isCancelled, active, sessionGeneration == generation, hearing, !talking else { return }
+            endTalking()
+        }
+    }
+
+    private func beginTalking() {
+        // A press while the characters speak or write cuts them off, without the pre-roll that
+        // would carry their voice.
+        let audible = playing || floor != nil
+        if audible || !writing.isEmpty { interruptReply() }
+        hearing = true
+        sendSession(["type": "talk", "talking": true])
+        listen(true, preRoll: !audible)
+    }
+
+    private func endTalking() {
+        releaseTask = nil
+        hearing = false
+        userLevel = 0
+        sendSession(["type": "talk", "talking": false])
+        listen(false, preRoll: false)
+    }
+
+    private func listen(_ on: Bool, preRoll: Bool) {
+        let generation = captureGeneration
+        Task {
+            do { try await speech.listen(on, preRoll: preRoll) }
+            catch is CancellationError { }
+            catch { if active, captureGeneration == generation { fail(error.localizedDescription) } }
+        }
+    }
+
+    /// Forget the push to talk in progress, if any.
+    private func releaseHold() {
+        talking = false
+        hearing = false
+        pressedAt = nil
+        releaseTask?.cancel()
+        releaseTask = nil
+    }
+
+    private func showHoldHint() {
+        showsHoldHint = true
+        hintTask?.cancel()
+        hintTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            if !Task.isCancelled { showsHoldHint = false }
+        }
+    }
+
+    func toggleMute() {
+        if outputOnly { start(holdingToTalk: false); return }
+        guard active, !preparing, !holdsToTalk else { return }
+        muted.toggle()
+        userLevel = 0
+        userTranscript.partial = ""
+        inputReady = false
+        let isMuted = muted
+        let generation = sessionGeneration
+        let captureGeneration = UUID()
+        self.captureGeneration = captureGeneration
+        // Python mutes at once but unmutes only once the input clock has restarted, so queued
+        // capture can't reset timestamps of audio Pipecat has accepted.
+        if isMuted { sendSession(["type": "mute"]) }
+        let previous = captureTask
+        captureTask = Task {
+            await previous?.value
+            guard active, sessionGeneration == generation,
+                  self.captureGeneration == captureGeneration else { return }
+            do {
+                try Task.checkCancellation()
+                // Muted audio is never recognized. Unmuting starts a fresh input, whose new
+                // generation rejects any recognition or classifier callbacks from before.
+                if isMuted { await speech.stop() } else { try await speech.start() }
+                try Task.checkCancellation()
+                guard active, sessionGeneration == generation,
+                      self.captureGeneration == captureGeneration else { return }
+                if !isMuted {
+                    sendSession(["type": "unmute"])
+                    inputReady = true
+                    configuredAudioRoute = audioRouteSignature
+                }
+            }
+            catch is CancellationError { }
+            catch { if sessionGeneration == generation { fail(error.localizedDescription) } }
+        }
+    }
+
+    func stop() {
+        explainer.userInteracted()
+        ConversationLaunchRequests.shared.cancel()
+        if ready { sendSession(["type": "stop"]) }
+        keepTranscript()
+        recorder = nil
+        active = false
+        outputOnly = false
+        pendingQuestion?.cancel()
+        pendingQuestion = nil
+        muted = false
+        releaseHold()
+        inputReady = false
+        preparing = false
+        isRecoveringAudio = false
+        routeRestarting = false
+        configuredAudioRoute = ""
+        captureGeneration = UUID()
+        sessionGeneration = UUID()
+        sessionTask?.cancel()
+        let previousPreparation = sessionTask
+        sessionTask = nil
+        captureTask?.cancel()
+        let previousCapture = captureTask
+        captureTask = nil
+        cancelRequests()
+        forgetTurn()
+        let previousStop = stopTask
+        stopTask = Task {
+            await previousStop?.value
+            await previousCapture?.value
+            await speech.stop()
+            audio.stop()
+            await previousPreparation?.value
+        }
+    }
+
+    func clearConversation() {
+        explainer.reset()
+        stop()
+        hasConversation = false
+        error = nil
+        send(["type": "reset"])
+    }
+
+    /// A fault in the app itself: its detail in Debug builds, a way forward in Release.
+    private static func developerError(_ detail: String) -> String {
+        #if DEBUG
+        detail
+        #else
+        "Something went wrong. Tap the microphone to start again."
+        #endif
+    }
+
+    private func fail(_ message: String) {
+        #if DEBUG
+        print("CONVERSATION_FAILED: \(message)")
+        #endif
+        stop()
+        error = message
+    }
+
+    /// Cancel the reply in progress and keep listening.
+    private func interruptReply() {
+        guard active else { return }
+        cancelRequests()
+        sendSession(["type": "interrupt"])
+        forgetTurn()
+    }
+
+    /// Forget the turn's words, speakers and lines.
+    private func forgetTurn() {
+        currentTurn = nil
+        resetStage()
+        userTranscript = UserTranscript()
+        userLevel = 0
+    }
+
+    // MARK: - Audio routes
+
+    private var audioRouteSignature: String {
+        let session = AVAudioSession.sharedInstance()
+        let ports = (session.currentRoute.inputs + session.currentRoute.outputs).map(\.uid)
+        return (ports + [session.mode.rawValue, String(session.sampleRate)]).joined(separator: "|")
+    }
+
+    private func audioRouteChanged() {
+        #if DEBUG
+        print("AUDIO_ROUTE: changed, active=\(active) preparing=\(preparing) recovering=\(isRecoveringAudio) "
+            + "from=\(configuredAudioRoute) to=\(audioRouteSignature)")
+        #endif
+        guard active, !preparing, !isRecoveringAudio,
+              configuredAudioRoute != audioRouteSignature || audio.routeChangeError() != nil else { return }
+        // Keep the Pipecat conversation, but cancel the current utterance/reply
+        // before rebuilding converters for the selected microphone's format.
+        interruptReply()
+        releaseHold()
+        inputReady = false
+        isRecoveringAudio = true
+        routeRestarting = false
+        preparing = true
+        sendSession(["type": "mute"])
+        audio.suspendForRouteChange()
+        let generation = sessionGeneration
+        let captureGeneration = UUID()
+        self.captureGeneration = captureGeneration
+        let previous = captureTask
+        previous?.cancel()
+        captureTask = Task {
+            await previous?.value
+            guard active, sessionGeneration == generation,
+                  self.captureGeneration == captureGeneration else { return }
+            await speech.stop()
+        }
+        finishAudioRouteChange()
+    }
+
+    private func finishAudioRouteChange() {
+        guard active, isRecoveringAudio, !routeRestarting else { return }
+        routeRestarting = true
+        let selectedInput = audio.currentInput
+        let generation = sessionGeneration
+        let captureGeneration = self.captureGeneration
+        let previous = captureTask
+        captureTask = Task {
+            await previous?.value
+            guard active, sessionGeneration == generation,
+                  self.captureGeneration == captureGeneration else { return }
+            do {
+                try Task.checkCancellation()
+                if outputOnly { try audio.configurePlaybackSession() }
+                else { try audio.configureSession(preservingInput: selectedInput) }
+                if !muted { try await speech.start() }
+                try Task.checkCancellation()
+                guard active, sessionGeneration == generation,
+                      self.captureGeneration == captureGeneration else { return }
+                if let message = audio.routeChangeError() { throw VoiceError(message: message) }
+                configuredAudioRoute = audioRouteSignature
+                #if DEBUG
+                print("AUDIO_ROUTE: recovered on \(audioRouteSignature)")
+                #endif
+                if !muted {
+                    // The fresh ASR clock must exist before Python admits input.
+                    sendSession(["type": "unmute"])
+                    inputReady = true
+                }
+                isRecoveringAudio = false
+                routeRestarting = false
+                preparing = false
+                // The microphone was pressed while the route changed.
+                if talking { beginTalking() }
+            } catch is CancellationError {
+                #if DEBUG
+                print("AUDIO_ROUTE: recovery cancelled")
+                #endif
+            }
+            catch { if sessionGeneration == generation { fail(error.localizedDescription) } }
+        }
+    }
+
+    // MARK: - Python's events
+
+    private func invalidatePreparation() {
+        modelWork.cancel()
+        languageModel.invalidate()
+    }
+
+    private func cancelRequests(preservePreparation: Bool = false) {
+        if !preservePreparation { invalidatePreparation() }
+        for task in requests.values { task.cancel() }
+        requests.removeAll()
+        languageModelRequest = nil
+        player.stop()
+        speechRequest = nil
+    }
+
+    private func handle(_ json: String) {
+        guard let data = json.data(using: .utf8) else { return }
+        if let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           payload["type"] as? String == "scene_action",
+           payload["session"] as? String == sessionGeneration.uuidString,
+           payload["turn"] as? String == currentTurn,
+           let command = payload["command"] as? [String: Any] {
+            lesson.apply(command)
+            return
+        }
+        if let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           payload["type"] as? String == "lesson_state" {
+            lesson.receive(payload)
+            return
+        }
+
+        if let event = try? JSONDecoder().decode(RTVIEnvelope.self, from: data), event.type == "rtvi" {
+            handleRTVI(event)
+            return
+        }
+        guard let event = try? JSONDecoder().decode(NativeEvent.self, from: data) else {
+            fail(Self.developerError("The Python bridge returned an invalid event."))
+            return
+        }
+        if event.type != "request", let session = event.session,
+           session != sessionGeneration.uuidString { return }
+        switch event.type {
+        case "ready":
+            ready = true
+            if legacyLesson { lesson.runtimeReady() }
+            #if DEBUG
+            print("PIPECAT_PYTHON_READY")
+            let arguments = ProcessInfo.processInfo.arguments
+            if let index = arguments.firstIndex(of: "--explainer-question"), arguments.indices.contains(index + 1) {
+                submitQuestion(arguments[index + 1])
+            }
+            #endif
+        case "user_turn":
+            guard active, !isRecoveringAudio,
+                  event.session == sessionGeneration.uuidString,
+                  let turn = event.turn else { return }
+            explainer.userInteracted()
+            // A session prepared after a fully played reply serves the next question; a
+            // generation in progress is cancelled.
+            cancelRequests(preservePreparation: requests.isEmpty)
+            keepTranscript()
+            currentTurn = turn
+            resetStage()
+            userTranscript = UserTranscript()
+            error = nil
+        case "error":
+            if event.operation == "speak", event.turn == currentTurn {
+                voiceFailure = event.message ?? "Speech failed. Choose a voice provider or Retry."
+                failedProvider = speechProviders.activeProvider ?? speechProviders.preferredProvider
+                interruptReply()
+                return
+            }
+            guard event.turn == nil || event.turn == currentTurn else { return }
+            if active, event.recoverable == true, event.operation == "generate" {
+                interruptReply()
+                error = event.message ?? "That reply failed. Please try another question."
+            } else { fail(event.message ?? "Something went wrong. Tap the microphone to start again.") }
+        case "cancel_request":
+            if let id = event.request {
+                if languageModelRequest == id { invalidatePreparation() }
+                requests.removeValue(forKey: id)?.cancel()
+                if speechRequest == id { player.stop(); speechRequest = nil }
+            }
+        case "cancel_turn":
+            if let turn = event.turn, turn == currentTurn { cancelRequests() }
+        case "state":
+            guard active, event.session == sessionGeneration.uuidString,
+                  event.turn == currentTurn, event.state == "listening" else { return }
+            endExchange()
+        case "addressed":
+            guard active, event.session == sessionGeneration.uuidString,
+                  event.turn != nil, event.turn == currentTurn else { return }
+            address(line: event.line, to: event.to ?? [])
+        case "dropped":
+            guard active, event.session == sessionGeneration.uuidString,
+                  event.turn != nil, event.turn == currentTurn, let line = event.line else { return }
+            // Nobody will say that line, so its writer stops typing.
+            writing[line] = nil
+            lineAddressees[line] = nil
+        case "prewarm":
+            guard legacyLesson, active, event.session == sessionGeneration.uuidString,
+                  event.turn == currentTurn else { return }
+            modelWork.prepare { [self] in
+                await languageModel.prepare(instructions: event.instructions ?? "", history: event.history ?? [])
+            }
+        case "request":
+            let validTurn = event.operation == "finalize_asr" || (event.turn != nil && event.turn == currentTurn)
+            let validInput = event.operation != "finalize_asr" || (inputReady && !isRecoveringAudio && !muted)
+            guard active, validTurn, validInput, event.session == sessionGeneration.uuidString else {
+                if let id = event.request { send(["type": "result", "request": id, "error": "Turn was cancelled"]) }
+                return
+            }
+            perform(event)
+        default: fail(Self.developerError("Unknown Python event: \(event.type)"))
+        }
+    }
+
+    private func handleRTVI(_ event: RTVIEnvelope) {
+        guard active, event.session == sessionGeneration.uuidString, event.turn == currentTurn else { return }
+        switch event.message.type {
+        case "bot-llm-started":
+            startWriting(line: event.line, speaker: event.speaker.flatMap(DuoCharacter.init(rawValue:)))
+        case "user-transcription":
+            let text = event.message.data?.text ?? ""
+            if event.message.data?.final == true { userTranscript.commit(text) } else { userTranscript.partial = text }
+            if !text.isEmpty { hasConversation = true }
+            if let turn = event.turn { recorder?.heard(human: userTranscript.text, turn: turn) }
+        default: break
+        }
+    }
+
+    // MARK: - The stage
+
+    /// Nobody has the floor, is being talked to or is writing: a new turn, an interruption or the end.
+    private func resetStage() {
+        floor = nil
+        addressed = []
+        captions.removeAll()
+        captionExpiry?.cancel()
+        heardLine = nil
+        writing.removeAll()
+        lineAddressees.removeAll()
+        exchangeOver = false
+    }
+
+    /// Whether line `line` of the turn is still to be heard.
+    private func isAhead(_ line: Int) -> Bool {
+        heardLine.map { line > $0 } ?? true
+    }
+
+    /// A sentence of a character's line starts playing: caption it, and give them the floor. The line's
+    /// first sentence also lights whoever it is for.
+    private func reveal(line: Int?, speaker: DuoCharacter?, sentence: String?) {
+        guard let line else { return }
+        if let speaker {
+            floor = speaker
+            captionExpiry?.cancel()
+            // Only the speaker's bubble shows: anyone else has finished talking.
+            captions = captions.filter { $0.key == speaker }
+            if let sentence, !sentence.isEmpty { captions[speaker] = sentence }
+        }
+        // Each of a line's sentences starts like this; only the first starts the line.
+        guard isAhead(line) else { return }
+        heardLine = line
+        addressed = lineAddressees[line] ?? []
+        // An earlier line not heard by now, such as one with nothing to say aloud, never will be.
+        writing = writing.filter { isAhead($0.key) }
+        lineAddressees = lineAddressees.filter { isAhead($0.key) }
+    }
+
+    /// Playback has stopped: the captions go once it has stayed quiet for `captionHold`, unless
+    /// another sentence starts first.
+    private func expireCaptions() {
+        captionExpiry?.cancel()
+        captionExpiry = Task { [weak self] in
+            try? await Task.sleep(for: Self.captionHold)
+            guard !Task.isCancelled, let self, !playing else { return }
+            captions.removeAll()
+        }
+    }
+
+    /// A character has started writing a line of the turn.
+    private func startWriting(line: Int?, speaker: DuoCharacter?) {
+        guard let line, let speaker, isAhead(line) else { return }
+        writing[line] = speaker
+    }
+
+    /// Audience's reading of who a line is for: the human's (`line` nil), lit at once, or a
+    /// character's, lit while it is heard.
+    private func address(line: Int?, to ids: [String]) {
+        let to = Set(ids.compactMap(DuoCharacter.init(rawValue:)))
+        guard let line else {
+            if floor == nil { addressed = to }
+            return
+        }
+        if heardLine == line { addressed = to } else if isAhead(line) { lineAddressees[line] = to }
+    }
+
+    /// Keeps the transcript so far, if this conversation is being kept.
+    private func keepTranscript() {
+        if let recorder, !recorder.isEmpty { history.save(recorder.conversation) }
+    }
+
+    /// Nobody writes more this turn. Once the last line has played, the floor is the human's.
+    private func endExchange() {
+        keepTranscript()
+        exchangeOver = true
+        writing.removeAll()
+        lineAddressees.removeAll()
+        if !playing {
+            floor = nil
+            addressed = []
+        }
+    }
+
+    // MARK: - Native work
+
+    /// Whether a request from session `generation` for `turn` still belongs to the live conversation.
+    private func isCurrent(_ generation: UUID, turn: String?) -> Bool {
+        active && sessionGeneration == generation && turn != nil && currentTurn == turn
+    }
+
+    private func perform(_ event: NativeEvent) {
+        guard let id = event.request, let operation = event.operation else { return }
+        let turn = event.turn
+        let generation = sessionGeneration
+        let inputGeneration = captureGeneration
+        // Speech endpoints belong to the microphone input rather than to a turn.
+        func stillCurrent() -> Bool {
+            guard operation == "finalize_asr" else { return isCurrent(generation, turn: turn) }
+            return active && sessionGeneration == generation && inputReady && !isRecoveringAudio && !muted
+                && captureGeneration == inputGeneration
+        }
+        let work: @MainActor () async -> Void = { [self] in
+            do {
+                try Task.checkCancellation()
+                guard stillCurrent() else { throw CancellationError() }
+                switch operation {
+                case "plan_explainer":
+                    let response = try await explainer.plan(text: event.text ?? "", requestID: id, heard: event.heard)
+                    guard stillCurrent() else { throw CancellationError() }
+                    send(["type": "result", "request": id, "value": response])
+                case "generate": try await generate(event, request: id, generation: generation)
+                case "speak": try await speak(event, request: id, generation: generation)
+                case "audience": try await readAudience(event, request: id)
+                case "finalize_asr": try await finalizeSpeech()
+                default: throw VoiceError(message: "Unknown native operation.")
+                }
+                try Task.checkCancellation()
+                guard stillCurrent() else { throw CancellationError() }
+                send(["type": "result", "request": id, "done": true])
+            } catch is CancellationError {
+            } catch {
+                if stillCurrent() {
+                    if operation == "speak" {
+                        voiceFailure = error.localizedDescription
+                        failedProvider = speechProviders.activeProvider ?? speechProviders.preferredProvider
+                        logger.error("Speech failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                    send(["type": "result", "request": id, "error": error.localizedDescription])
+                }
+            }
+        }
+        let completed: @MainActor () -> Void = { [self] in
+            requests.removeValue(forKey: id)
+            if speechRequest == id { speechRequest = nil }
+            if languageModelRequest == id { languageModelRequest = nil }
+        }
+        if operation == "generate" {
+            requests[id] = modelWork.generate(work, onCompletion: completed)
+        } else {
+            requests[id] = Task { defer { completed() }; await work() }
+        }
+    }
+
+    private func generate(_ event: NativeEvent, request: String, generation: UUID) async throws {
+        let turn = event.turn
+        languageModelRequest = request
+        speech.logAudioMetrics(stage: "generation_start")
+        try await languageModel.generate(prompt: event.prompt ?? "", instructions: event.instructions ?? "",
+                                         history: event.history ?? []) { delta in
+            guard isCurrent(generation, turn: turn), !Task.isCancelled else { return }
+            send(["type": "result", "request": request, "delta": delta])
+        }
+    }
+
+    /// Speak a sentence in its character's voice, through to the end of its playback.
+    private func speak(_ event: NativeEvent, request: String, generation: UUID) async throws {
+        if let basis = event.basis, !basis.matches(explainer.activeScene) { throw CancellationError() }
+        let turn = event.turn
+        speechRequest = request
+        speech.logAudioMetrics(stage: "synthesis_start")
+        let character = event.speaker.flatMap(DuoCharacter.init(rawValue:))
+        if outputOnly { try await loadModels().value }
+        try await speechProviders.preparePreferred()
+        try Task.checkCancellation()
+        let providerGeneration = speechProviders.generation
+        guard let characterID = character?.rawValue else { throw VoiceError(message: "The reply has no valid character voice.") }
+        let synthesis = try await speechProviders.synthesize(event.text ?? "", characterID: characterID)
+        // The speaker's mouth shapes the sentence's words as they are heard.
+        if let character { mouths[character]?.expect(text: event.text) }
+        var scheduled = 0
+        do {
+            try await withTaskCancellationHandler {
+                var stream = synthesis.samples
+                #if DEBUG
+                if ConversationScript.buffersSpeech { stream = try await ConversationScript.buffered(stream) }
+                #endif
+                for try await samples in stream where !samples.isEmpty {
+                    try Task.checkCancellation()
+                    guard isCurrent(generation, turn: turn), speechRequest == request,
+                          event.basis?.matches(explainer.activeScene) != false,
+                          speechProviders.generation == providerGeneration else {
+                        throw CancellationError()
+                    }
+                    if scheduled == 0 {
+                        speech.logAudioMetrics(stage: "synthesis_first_pcm")
+                    }
+                    #if DEBUG
+                    if scheduled > 0, !playing {
+                        print(String(format: "PLAYBACK_UNDERRUN: %@ line %d after %.2f s of audio",
+                                     character?.rawValue ?? "-", event.line ?? -1,
+                                     Double(scheduled) / PCMPlayer.format.sampleRate))
+                    }
+                    #endif
+                    // Every chunk drives its speaker's mouth: a player that ran dry between
+                    // chunks has ended the mouth's utterance, and the next chunk starts another.
+                    if let character, character != speakingCharacter {
+                        if let previous = speakingCharacter { mouths[previous]?.finish() }
+                        speakingCharacter = character
+                    }
+                    try player.enqueue(samples)
+                    if scheduled == 0 {
+                        voiceFailure = nil
+                        failedProvider = nil
+                        reveal(line: event.line, speaker: character, sentence: event.text)
+                        if let turn, let line = event.line, let character, let text = event.text {
+                            recorder?.heard(sentence: text, line: line, speaker: character, turn: turn)
+                        }
+                        #if DEBUG
+                        print("TUTOR_SPEECH_STARTED: \(characterID) line=\(event.line ?? -1) provider=\(speechProviders.activeProvider?.rawValue ?? "none")")
+                        #endif
+                    }
+                    scheduled += samples.count
+                }
+                guard scheduled > 0 else { throw VoiceError(message: "The voice returned no audio. Retry the voice, then ask again.") }
+                try await player.finish()
+                if let text = event.text {
+                    explainer.recordPresented(["dialogue": [["speaker": characterID, "text": text]]])
+                }
+                #if DEBUG
+                print("TUTOR_SPEECH_PLAYED: \(characterID) samples=\(scheduled)")
+                #endif
+            } onCancel: { synthesis.cancel() }
+            await synthesis.waitForCompletion()
+            guard speechProviders.generation == providerGeneration else { throw CancellationError() }
+        } catch {
+            synthesis.cancel()
+            await synthesis.waitForCompletion()
+            if error is CancellationError || Task.isCancelled || speechProviders.generation != providerGeneration { throw CancellationError() }
+            voiceFailure = error.localizedDescription
+            failedProvider = speechProviders.activeProvider
+            logger.error("Speech failed: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+    }
+
+    /// Ask Audience who a line is for, on inputs Python rendered.
+    private func readAudience(_ event: NativeEvent, request: String) async throws {
+        let answer = try await audience.answer(
+            cards: event.cards ?? [], line: event.utterance ?? "", current: event.current ?? 0,
+            people: event.people ?? [], features: event.features ?? [])
+        try Task.checkCancellation()
+        send(["type": "result", "request": request,
+              "value": ["person": answer.person, "unclear": answer.unclear, "group": answer.group]])
+    }
+
+    /// Finish recognizing the speech so far, for Python's end of the human's turn.
+    private func finalizeSpeech() async throws {
+        guard !muted else { throw CancellationError() }
+        try await speech.finalize()
+    }
+}
+
+#if DEBUG
+/// Developer checks, previews and demos, chosen by launch argument (see docs/native-tts.md).
+extension ConversationModel {
+    /// A showreel's line: who says it, and who it is for, if not the viewer.
+    private struct ShowreelLine {
+        let character: DuoCharacter
+        let text: String
+        var to: Set<DuoCharacter> = []
+    }
+
+    /// The showreel's scenes: their lines, then the reactions that end them, each that many seconds
+    /// after the last.
+    private static let showreels: [String: (lines: [ShowreelLine], ending: [(StageReaction, after: Double)])] = [
+        "hello": ([ShowreelLine(character: .genius, text: "Hello! I'm Genius. Let's be a little light in the world!"),
+                   ShowreelLine(character: .rookie,
+                                text: "Oh, please. I'm Rookie, and you should listen to me. My world has snacks.")],
+                  [(.laughTogether, 0.4)]),
+        "on-device": ([ShowreelLine(character: .genius,
+                                    text: "Rookie, did you know we're running entirely on-device, with no network?",
+                                    to: [.rookie]),
+                       ShowreelLine(character: .rookie,
+                                    text: "Yes! I knew that. I also know we're built with Pipecat, and Gradium's Phonon "
+                                        + "text-to-speech.", to: [.genius])],
+                      []),
+        "outro": ([ShowreelLine(character: .rookie, text: "So, Genius, apparently we live in a repo on GitHub now?",
+                                to: [.genius]),
+                   ShowreelLine(character: .genius, text: "That's right, Rookie! And soon, the App Store.", to: [.rookie]),
+                   ShowreelLine(character: .rookie, text: "Oh, great. Now everyone will be asking us questions!")],
+                  [(.laughTogether, 0.4)]),
+        "handsome": ([ShowreelLine(character: .rookie, text: "I must say, I do sound rather handsome. Rookieishly handsome.")],
+                     [(.eyeRoll(.genius), 0.2), (.look(.genius, .sideEye, seconds: 1.6), 1.1)]),
+        "snacks": ([ShowreelLine(character: .genius, text: "His snacks are a lie. Anyway, let's try this app out!")], []),
+        "audience": ([ShowreelLine(character: .genius,
+                                   text: "We use the Pipecat Audience model to work out which of us you're talking to.")],
+                     []),
+    ]
+
+    /// `--showreel [scene]`: once the intro has played and the voices have loaded, the genius and the
+    /// rookie play a scene (`showreels`, `hello` by default), as they would in a conversation, then
+    /// react as it ends. With `--record-audio` it records what plays (`DEMO_AUDIO`); it logs
+    /// `SHOWREEL_END` with the wall-clock time the last line ends, `SHOWREEL_REACTION` with each
+    /// reaction's, then `SHOWREEL_DONE`.
+    fileprivate func playShowreel() async {
+        let name = StageDebug.value(after: "--showreel") ?? "hello"
+        guard let scene = Self.showreels[name] else {
+            print("SHOWREEL_FAILED: no scene \(name); try \(Self.showreels.keys.sorted().joined(separator: ", "))")
+            return
+        }
+        while awaitingIntro || loading { try? await Task.sleep(for: .milliseconds(50)) }
+        do {
+            // Synthesized in full before it plays, so a busy machine, recording the screen, cannot
+            // starve playback.
+            var takes: [[ShowreelSentence]] = []
+            for line in scene.lines { takes.append(try await synthesizeShowreel(line.text, as: line.character)) }
+            try? await Task.sleep(for: .seconds(0.6))
+            try audio.configureSession()
+            try audio.start()
+            if ProcessInfo.processInfo.arguments.contains("--record-audio") {
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("demo-audio.caf")
+                try? FileManager.default.removeItem(at: url)
+                let latency = AVAudioSession.sharedInstance().outputLatency
+                try audio.recordOutput(to: url) { started in
+                    print(String(format: "DEMO_AUDIO: %.6f %.6f %@", started.timeIntervalSince1970, latency, url.path))
+                }
+            }
+            resetStage()
+            for (index, line) in scene.lines.enumerated() {
+                if index > 0 { try? await Task.sleep(for: .seconds(0.45)) }
+                lineAddressees[index] = line.to
+                try await playShowreel(takes[index], as: line.character, line: index, last: index == scene.lines.count - 1)
+            }
+            print(String(format: "SHOWREEL_END: %.6f", Date().timeIntervalSince1970))
+            for (reaction, after) in scene.ending {
+                try? await Task.sleep(for: .seconds(after))
+                reactions.append(reaction)
+                print(String(format: "SHOWREEL_REACTION: %.6f", Date().timeIntervalSince1970))
+            }
+            try? await Task.sleep(for: .seconds(3))
+            audio.stopRecordingOutput()
+            print("SHOWREEL_DONE")
+        } catch {
+            print("SHOWREEL_FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Words Phonon says best respelled: it says the caption's word as the respelling.
+    private static let showreelRespellings = ["Pipecat": "Pipe cat", "GitHub": "Git Hub"]
+
+    /// A sentence of a showreel line: its caption, what Phonon says, and the audio.
+    private struct ShowreelSentence {
+        let caption: String
+        let spoken: String
+        let samples: [Float]
+    }
+
+    /// One of the scene's lines, a sentence at a time as a conversation's are, each synthesized in
+    /// full.
+    private func synthesizeShowreel(_ text: String, as character: DuoCharacter) async throws -> [ShowreelSentence] {
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var sentences: [ShowreelSentence] = []
+        for range in tokenizer.tokens(for: text.startIndex..<text.endIndex) {
+            let caption = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !caption.isEmpty else { continue }
+            let spoken = Self.showreelRespellings.reduce(caption) { $0.replacingOccurrences(of: $1.key, with: $1.value) }
+            let synthesis = try await speechProviders.synthesize(spoken, characterID: character.rawValue)
+            var samples: [Float] = []
+            for try await chunk in synthesis.samples { samples += chunk }
+            await synthesis.waitForCompletion()
+            sentences.append(ShowreelSentence(caption: caption, spoken: spoken, samples: samples))
+        }
+        return sentences
+    }
+
+    /// Plays a line's sentences as a conversation's play, with a breath between them: each through
+    /// playback, lip sync and its caption. After the last, the floor is nobody's again.
+    private func playShowreel(_ sentences: [ShowreelSentence], as character: DuoCharacter, line: Int,
+                              last: Bool) async throws {
+        for (index, sentence) in sentences.enumerated() {
+            if index > 0 { try? await Task.sleep(for: .seconds(0.2)) }
+            mouths[character]?.expect(text: sentence.spoken)
+            reveal(line: line, speaker: character, sentence: sentence.caption)
+            if last, index == sentences.count - 1 { exchangeOver = true }
+            if let previous = speakingCharacter, previous != character { mouths[previous]?.finish() }
+            speakingCharacter = character
+            // In the chunks Phonon streams, as a conversation's audio arrives.
+            for start in stride(from: 0, to: sentence.samples.count, by: 1920) {
+                try player.enqueue(Array(sentence.samples[start..<min(start + 1920, sentence.samples.count)]))
+            }
+            try await player.finish()
+        }
+    }
+
+    fileprivate func runLaunchDiagnostics() {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--showreel") { Task { await playShowreel() } }
+        if arguments.contains("--verify-voice-settings") {
+            print("PHONON_SETTINGS: voices=\(VoiceSettings.voices.joined(separator: ","))")
+        }
+        let checks: [(flag: String, run: @MainActor () async -> Void)] = [
+            ("--verify-phonon", { await TTSDiagnostics.verifySynthesis() }),
+            ("--verify-output-playback", { await TTSDiagnostics.verifySynthesis(playsAudio: true) }),
+            ("--verify-managed-speech", { await TTSDiagnostics.verifyManagedSpeech() }),
+            ("--verify-phonon-playback", { await TTSDiagnostics.run() }),
+            ("--benchmark-phonon", { await TTSDiagnostics.benchmark() }),
+            ("--verify-audience", { [weak self] in await self?.verifyAudience() }),
+        ]
+        for check in checks where arguments.contains(check.flag) {
+            checking = true
+            Task { await check.run() }
+        }
+        if let script { Task { await script.run(self) } }
+    }
+
+    /// What a scripted run checks besides the screen: whether audio is playing, which line of the
+    /// turn is being heard, the lines being written, and whether the turn's exchange is over.
+    var scriptedView: (playing: Bool, line: Int?, writing: [Int], exchangeOver: Bool) {
+        (playing, heardLine, writing.keys.sorted(), exchangeOver)
+    }
+
+    /// Log every Python module imported so far (`PYTHON_MODULES`), which shows what the bundled
+    /// standard library and packages must keep.
+    func logPythonModules() {
+        print("PYTHON_MODULES: \(runtime.importedModuleNames().joined(separator: " "))")
+    }
+
+    /// Run the bundled Audience model on inputs the Audience reference runtime rendered, and
+    /// compare with its answer on ONNX Runtime (tests/fixtures/audience/answers.json).
+    private func verifyAudience() async {
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            try await audience.prepare()
+            let loaded = ProcessInfo.processInfo.systemUptime - started
+            let answer = try await audience.answer(
+                cards: AudienceSample.cards, line: AudienceSample.line, current: AudienceSample.current,
+                people: AudienceSample.people, features: AudienceSample.features)
+            let values = answer.person + [answer.unclear, answer.group]
+            let expected = AudienceSample.person + [AudienceSample.unclear, AudienceSample.group]
+            let worst = zip(values, expected).map { abs($0 - $1) }.max() ?? .infinity
+            let timed = ProcessInfo.processInfo.systemUptime
+            for _ in 0..<10 {
+                _ = try await audience.answer(
+                    cards: AudienceSample.cards, line: AudienceSample.line, current: AudienceSample.current,
+                    people: AudienceSample.people, features: AudienceSample.features)
+            }
+            let perLine = (ProcessInfo.processInfo.systemUptime - timed) * 100
+            print(String(format: "AUDIENCE_%@: genius %.3f rookie %.3f unclear %.3f group %.3f; largest difference %.1e; loaded in %.2f s, %.1f ms per line",
+                         worst < 1e-4 ? "VERIFIED" : "MISMATCH", answer.person[0], answer.person[1], answer.unclear,
+                         answer.group, worst, loaded, perLine))
+        } catch {
+            print("AUDIENCE_FAILED: \(error.localizedDescription)")
+        }
+    }
+}
+#endif
